@@ -1,3 +1,5 @@
+<img width="1344" height="768" alt="bust-v1-transparent" src="https://github.com/user-attachments/assets/f13ff9e7-bcb6-4a0a-8331-423aa1a69ba4" />
+
 # Orator
 
 **Highlight any text, anywhere on your Mac. Press a key. Hear it read aloud in a beautiful AI voice.**
