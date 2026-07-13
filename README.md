@@ -80,9 +80,6 @@ Built on [kokoro-ios](https://github.com/mlalma/kokoro-ios) (KokoroSwift),
 [mlx-swift](https://github.com/ml-explore/mlx-swift), and
 [MisakiSwift](https://github.com/mlalma/MisakiSwift) G2P.
 
-## Sibling project
-
-[orator-chrome-extension](https://github.com/MyronKoch/orator-chrome-extension) - the browser-extension version of Orator (reads web pages with Kokoro & Supertonic engines inside Chrome).
 
 ## License
 
