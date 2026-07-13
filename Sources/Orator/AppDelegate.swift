@@ -1,0 +1,387 @@
+import Cocoa
+import ServiceManagement
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+
+    // MARK: - State
+
+    private var statusItem: NSStatusItem!
+    private var engine: OratorEngine?
+    private var engineError: String?
+    private var keyMonitor: Any?
+    private var trustPollTimer: Timer?
+    private var onboardingWindow: NSWindow?
+    private var onboardingStatusLabel: NSTextField?
+
+    private let defaults = UserDefaults.standard
+    private enum Pref {
+        static let voice = "voice"
+        static let speed = "speed"
+    }
+
+    // Option + ' (US keyboard apostrophe = keyCode 39)
+    private let hotKeyCode: UInt16 = 39
+    static let hotKeyLabel = "\u{2325} '"
+
+    // MARK: - Launch
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        setupStatusItem()
+        loadEngineAsync()
+
+        if AXIsProcessTrusted() {
+            installKeyMonitor()
+        } else {
+            showOnboarding()
+            startTrustPolling()
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: .oratorSpeechStarted, object: nil, queue: .main
+        ) { [weak self] _ in Task { @MainActor in self?.updateIcon(speaking: true) } }
+        NotificationCenter.default.addObserver(
+            forName: .oratorSpeechFinished, object: nil, queue: .main
+        ) { [weak self] _ in Task { @MainActor in self?.updateIcon(speaking: false) } }
+    }
+
+    // MARK: - Engine
+
+    private func loadEngineAsync() {
+        guard let modelPath = Bundle.main.url(forResource: "kokoro-v1_0", withExtension: "safetensors"),
+              let voicesPath = Bundle.main.url(forResource: "voices", withExtension: "npz") else {
+            engineError = "Model files missing from app bundle"
+            rebuildMenu()
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                let engine = try OratorEngine(modelPath: modelPath, voicesPath: voicesPath)
+                engine.warmUp()
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.engine = engine
+                    engine.currentVoice = self.defaults.string(forKey: Pref.voice) ?? "af_heart"
+                    let savedSpeed = self.defaults.float(forKey: Pref.speed)
+                    engine.speed = savedSpeed > 0 ? savedSpeed : 1.0
+                    self.rebuildMenu()
+                    NSLog("Orator: engine ready (%d voices)", engine.voiceNames.count)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self?.engineError = error.localizedDescription
+                    self?.rebuildMenu()
+                    NSLog("Orator: engine failed: %@", error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    // MARK: - Global hotkey (NSEvent, requires Accessibility)
+
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == self?.hotKeyCode,
+                  event.modifierFlags.intersection([.option, .command, .control, .shift]) == .option
+            else { return }
+            Task { @MainActor in self?.toggleSpeech() }
+        }
+        NSLog("Orator: global key monitor installed")
+        rebuildMenu()
+    }
+
+    private func startTrustPolling() {
+        trustPollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            guard AXIsProcessTrusted() else { return }
+            Task { @MainActor in
+                guard let self = self else { return }
+                self.trustPollTimer?.invalidate()
+                self.trustPollTimer = nil
+                self.installKeyMonitor()
+                self.dismissOnboarding()
+            }
+        }
+    }
+
+    // MARK: - Speak toggle
+
+    private func toggleSpeech() {
+        guard let engine = engine else { return }
+
+        if engine.isSpeaking {
+            engine.stop()
+            return
+        }
+
+        captureSelectedText { [weak self] text in
+            guard let self = self, let engine = self.engine else { return }
+            guard let text = text, !text.isEmpty else {
+                NSLog("Orator: no text selected")
+                return
+            }
+            NSLog("Orator: speaking %d chars", text.count)
+            DispatchQueue.global(qos: .userInitiated).async {
+                do { try engine.speak(text) }
+                catch { NSLog("Orator: speak failed: %@", error.localizedDescription) }
+            }
+        }
+    }
+
+    /// Simulate Cmd+C, read the pasteboard, then restore the user's clipboard.
+    private func captureSelectedText(completion: @escaping @MainActor (String?) -> Void) {
+        let pasteboard = NSPasteboard.general
+        let saved = savePasteboard(pasteboard)
+        let changeCount = pasteboard.changeCount
+
+        let source = CGEventSource(stateID: .hidSystemState)
+        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: true)
+        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: false)
+        keyDown?.flags = .maskCommand
+        keyUp?.flags = .maskCommand
+        keyDown?.post(tap: .cgAnnotatedSessionEventTap)
+        keyUp?.post(tap: .cgAnnotatedSessionEventTap)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            var text: String?
+            if pasteboard.changeCount != changeCount {
+                text = pasteboard.string(forType: .string)
+            }
+            self.restorePasteboard(pasteboard, items: saved)
+            completion(text)
+        }
+    }
+
+    private func savePasteboard(_ pb: NSPasteboard) -> [[NSPasteboard.PasteboardType: Data]] {
+        (pb.pasteboardItems ?? []).map { item in
+            var dict = [NSPasteboard.PasteboardType: Data]()
+            for type in item.types {
+                if let data = item.data(forType: type) { dict[type] = data }
+            }
+            return dict
+        }
+    }
+
+    private func restorePasteboard(_ pb: NSPasteboard, items: [[NSPasteboard.PasteboardType: Data]]) {
+        pb.clearContents()
+        for itemDict in items {
+            let item = NSPasteboardItem()
+            for (type, data) in itemDict { item.setData(data, forType: type) }
+            pb.writeObjects([item])
+        }
+    }
+
+    // MARK: - Menu bar
+
+    private func setupStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        updateIcon(speaking: false)
+        rebuildMenu()
+    }
+
+    private func updateIcon(speaking: Bool) {
+        let symbol = speaking ? "waveform.circle.fill" : "waveform.circle"
+        statusItem.button?.image = NSImage(
+            systemSymbolName: symbol, accessibilityDescription: "Orator"
+        )
+    }
+
+    private func rebuildMenu() {
+        let menu = NSMenu()
+
+        let title = NSMenuItem(title: "Orator", action: nil, keyEquivalent: "")
+        title.isEnabled = false
+        menu.addItem(title)
+        menu.addItem(.separator())
+
+        // Status line
+        let status: String
+        if let err = engineError {
+            status = "⚠️ \(err)"
+        } else if engine == nil {
+            status = "Loading voices…"
+        } else if !AXIsProcessTrusted() {
+            status = "⚠️ Needs Accessibility permission"
+        } else {
+            status = "Ready — select text, press \(Self.hotKeyLabel)"
+        }
+        let statusLine = NSMenuItem(title: status, action: nil, keyEquivalent: "")
+        statusLine.isEnabled = false
+        menu.addItem(statusLine)
+
+        if !AXIsProcessTrusted() {
+            let fix = NSMenuItem(title: "Grant Permission…", action: #selector(openOnboarding), keyEquivalent: "")
+            fix.target = self
+            menu.addItem(fix)
+        }
+        menu.addItem(.separator())
+
+        // Voice picker
+        if let engine = engine {
+            let voiceRoot = NSMenuItem(title: "Voice", action: nil, keyEquivalent: "")
+            let voiceMenu = NSMenu()
+            for name in engine.voiceNames {
+                let item = NSMenuItem(title: displayName(for: name), action: #selector(selectVoice(_:)), keyEquivalent: "")
+                item.representedObject = name
+                item.target = self
+                item.state = name == engine.currentVoice ? .on : .off
+                voiceMenu.addItem(item)
+            }
+            voiceRoot.submenu = voiceMenu
+            menu.addItem(voiceRoot)
+
+            // Speed picker
+            let speedRoot = NSMenuItem(title: "Speed", action: nil, keyEquivalent: "")
+            let speedMenu = NSMenu()
+            for value in [Float(0.8), 0.9, 1.0, 1.1, 1.25, 1.5] {
+                let item = NSMenuItem(title: String(format: "%.2gx", value), action: #selector(selectSpeed(_:)), keyEquivalent: "")
+                item.representedObject = value
+                item.target = self
+                item.state = abs(engine.speed - value) < 0.01 ? .on : .off
+                speedMenu.addItem(item)
+            }
+            speedRoot.submenu = speedMenu
+            menu.addItem(speedRoot)
+            menu.addItem(.separator())
+        }
+
+        // Login item toggle
+        let login = NSMenuItem(title: "Start at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
+        login.target = self
+        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        menu.addItem(login)
+
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "Quit Orator", action: #selector(quit), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+
+        statusItem.menu = menu
+    }
+
+    private func displayName(for voice: String) -> String {
+        let parts = voice.split(separator: "_")
+        guard parts.count == 2 else { return voice }
+        let accent = parts[0].hasPrefix("a") ? "US" : "UK"
+        let gender = parts[0].hasSuffix("f") ? "Female" : "Male"
+        return "\(parts[1].capitalized)  (\(accent) \(gender))"
+    }
+
+    // MARK: - Menu actions
+
+    @objc private func selectVoice(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String, let engine = engine else { return }
+        engine.stop()
+        engine.currentVoice = name
+        defaults.set(name, forKey: Pref.voice)
+        rebuildMenu()
+    }
+
+    @objc private func selectSpeed(_ sender: NSMenuItem) {
+        guard let value = sender.representedObject as? Float, let engine = engine else { return }
+        engine.speed = value
+        defaults.set(value, forKey: Pref.speed)
+        rebuildMenu()
+    }
+
+    @objc private func toggleLoginItem() {
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+        } catch {
+            NSLog("Orator: login item toggle failed: %@", error.localizedDescription)
+        }
+        rebuildMenu()
+    }
+
+    @objc private func openOnboarding() {
+        showOnboarding()
+        if trustPollTimer == nil { startTrustPolling() }
+    }
+
+    @objc private func quit() {
+        engine?.stop()
+        NSApp.terminate(nil)
+    }
+
+    // MARK: - Onboarding window
+
+    private func showOnboarding() {
+        if let window = onboardingWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered, defer: false
+        )
+        window.title = "Welcome to Orator"
+        window.center()
+        window.isReleasedWhenClosed = false
+
+        let content = NSStackView()
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 14
+        content.edgeInsets = NSEdgeInsets(top: 24, left: 28, bottom: 24, right: 28)
+
+        let heading = NSTextField(labelWithString: "One quick setup step")
+        heading.font = .systemFont(ofSize: 20, weight: .semibold)
+
+        let body = NSTextField(wrappingLabelWithString:
+            "Orator reads any text on your screen out loud.\n\n" +
+            "To do that, macOS requires you to grant it Accessibility access:\n\n" +
+            "1. Click “Open System Settings” below\n" +
+            "2. Find “Orator” in the list (use the + button if it's not there)\n" +
+            "3. Turn the switch ON\n\n" +
+            "Then highlight any text anywhere and press \(Self.hotKeyLabel) (Option + apostrophe) to hear it. Press it again to stop."
+        )
+        body.font = .systemFont(ofSize: 13)
+        body.preferredMaxLayoutWidth = 400
+
+        let statusLabel = NSTextField(labelWithString: "Waiting for permission…")
+        statusLabel.font = .systemFont(ofSize: 12)
+        statusLabel.textColor = .secondaryLabelColor
+        onboardingStatusLabel = statusLabel
+
+        let button = NSButton(title: "Open System Settings", target: self, action: #selector(openAccessibilitySettings))
+        button.bezelStyle = .rounded
+        button.keyEquivalent = "\r"
+
+        content.addArrangedSubview(heading)
+        content.addArrangedSubview(body)
+        content.addArrangedSubview(button)
+        content.addArrangedSubview(statusLabel)
+
+        window.contentView = content
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        onboardingWindow = window
+
+        // Also fire the system prompt so Orator appears in the list automatically.
+        let promptKey = "AXTrustedCheckOptionPrompt" as CFString
+        _ = AXIsProcessTrustedWithOptions([promptKey: kCFBooleanTrue!] as CFDictionary)
+    }
+
+    private func dismissOnboarding() {
+        onboardingStatusLabel?.stringValue = "✓ Permission granted — you're all set!"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            self?.onboardingWindow?.close()
+            self?.onboardingWindow = nil
+            self?.onboardingStatusLabel = nil
+            self?.rebuildMenu()
+        }
+    }
+
+    @objc private func openAccessibilitySettings() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        NSWorkspace.shared.open(url)
+    }
+}
