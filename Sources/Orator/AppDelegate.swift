@@ -9,7 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var engine: OratorEngine?
     private var engineError: String?
-    private var keyMonitor: Any?
+    private var hotkeyManager: HotkeyManager?
     private var trustPollTimer: Timer?
     private var onboardingWindow: NSWindow?
     private var onboardingStatusLabel: NSTextField?
@@ -81,14 +81,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Global hotkey (NSEvent, requires Accessibility)
 
     private func installKeyMonitor() {
-        guard keyMonitor == nil else { return }
-        keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard event.keyCode == self?.hotKeyCode,
-                  event.modifierFlags.intersection([.option, .command, .control, .shift]) == .option
-            else { return }
+        guard hotkeyManager == nil else { return }
+        let manager = HotkeyManager { [weak self] in
             Task { @MainActor in self?.toggleSpeech() }
         }
-        NSLog("Orator: global key monitor installed")
+        manager.installAll()
+        hotkeyManager = manager
         rebuildMenu()
     }
 
@@ -108,23 +106,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Speak toggle
 
     private func toggleSpeech() {
-        guard let engine = engine else { return }
+        guard let engine = engine else { oratorLog("toggle: engine nil"); return }
 
         if engine.isSpeaking {
+            oratorLog("toggle: was speaking → stop")
             engine.stop()
             return
         }
 
+        oratorLog("toggle: capturing selection…")
         captureSelectedText { [weak self] text in
             guard let self = self, let engine = self.engine else { return }
             guard let text = text, !text.isEmpty else {
-                NSLog("Orator: no text selected")
+                oratorLog("capture: NO TEXT (copy produced nothing)")
                 return
             }
-            NSLog("Orator: speaking %d chars", text.count)
+            oratorLog("capture: got \(text.count) chars — speaking")
             DispatchQueue.global(qos: .userInitiated).async {
                 do { try engine.speak(text) }
-                catch { NSLog("Orator: speak failed: %@", error.localizedDescription) }
+                catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
             }
         }
     }
@@ -143,11 +143,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keyDown?.post(tap: .cgAnnotatedSessionEventTap)
         keyUp?.post(tap: .cgAnnotatedSessionEventTap)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             var text: String?
-            if pasteboard.changeCount != changeCount {
+            let changed = pasteboard.changeCount != changeCount
+            if changed {
                 text = pasteboard.string(forType: .string)
             }
+            oratorLog("capture: pasteboard changed=\(changed) len=\(text?.count ?? -1)")
             self.restorePasteboard(pasteboard, items: saved)
             completion(text)
         }
@@ -244,6 +246,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             speedRoot.submenu = speedMenu
             menu.addItem(speedRoot)
             menu.addItem(.separator())
+
+            let speakClipboard = NSMenuItem(title: "Speak Clipboard", action: #selector(speakClipboardText), keyEquivalent: "")
+            speakClipboard.target = self
+            menu.addItem(speakClipboard)
+
+            let speakTest = NSMenuItem(title: "Speak Test Sentence", action: #selector(speakTestSentence), keyEquivalent: "")
+            speakTest.target = self
+            menu.addItem(speakTest)
+
+            let stopItem = NSMenuItem(title: "Stop Speaking", action: #selector(stopSpeaking), keyEquivalent: "")
+            stopItem.target = self
+            menu.addItem(stopItem)
+            menu.addItem(.separator())
         }
 
         // Login item toggle
@@ -296,6 +311,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("Orator: login item toggle failed: %@", error.localizedDescription)
         }
         rebuildMenu()
+    }
+
+    @objc private func speakClipboardText() {
+        guard let engine = engine,
+              let text = NSPasteboard.general.string(forType: .string) else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            do { try engine.speak(text) }
+            catch { NSLog("Orator: speak failed: %@", error.localizedDescription) }
+        }
+    }
+
+    @objc private func speakTestSentence() {
+        guard let engine = engine else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            do { try engine.speak("Hello! Orator is working. Select any text and press option apostrophe to hear it read aloud.") }
+            catch { NSLog("Orator: test speak failed: %@", error.localizedDescription) }
+        }
+    }
+
+    @objc private func stopSpeaking() {
+        engine?.stop()
     }
 
     @objc private func openOnboarding() {

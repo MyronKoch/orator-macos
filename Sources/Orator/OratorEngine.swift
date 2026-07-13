@@ -73,6 +73,7 @@ final class OratorEngine: @unchecked Sendable {
             throw OratorError.voicesNotFound
         }
         voices = loaded
+        oratorLog("engine: loaded \(loaded.count) voices, sample keys: \(Array(loaded.keys.sorted().prefix(3)))")
 
         format = AVAudioFormat(
             standardFormatWithSampleRate: Double(KokoroTTS.Constants.samplingRate),
@@ -96,7 +97,12 @@ final class OratorEngine: @unchecked Sendable {
         let chunks = TextChunker.chunk(text)
         guard !chunks.isEmpty else { return }
 
-        guard let voiceEmbedding = voices[currentVoice + ".npy"] else {
+        // Voice keys may carry zero, one, or two ".npy" suffixes depending on
+        // how the NPZ was authored - try all spellings.
+        guard let voiceEmbedding = voices[currentVoice + ".npy"]
+            ?? voices[currentVoice]
+            ?? voices[currentVoice + ".npy.npy"] else {
+            oratorLog("speak: lookup failed for \(currentVoice); available: \(Array(voices.keys.sorted().prefix(4)))")
             throw OratorError.voiceNotFound(currentVoice)
         }
         let language: Language = currentVoice.hasPrefix("b") ? .enGB : .enUS
