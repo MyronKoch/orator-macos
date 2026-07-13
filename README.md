@@ -4,6 +4,18 @@
 
 # Orator
 
+<p align="center">
+  <a href="https://github.com/MyronKoch/orator-macos/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/MyronKoch/orator-macos?color=coral&label=release"></a>
+  <a href="https://github.com/MyronKoch/orator-macos/releases"><img alt="Total downloads" src="https://img.shields.io/github/downloads/MyronKoch/orator-macos/total?color=coral&label=downloads"></a>
+  <img alt="Platform: macOS 15+" src="https://img.shields.io/badge/macOS-15%2B-1a2a4f?logo=apple&logoColor=white">
+  <img alt="Apple Silicon only" src="https://img.shields.io/badge/Apple%20Silicon-required-1a2a4f?logo=apple&logoColor=white">
+  <img alt="Swift 6.2" src="https://img.shields.io/badge/Swift-6.2-f05138?logo=swift&logoColor=white">
+  <img alt="Built with MLX" src="https://img.shields.io/badge/inference-MLX-1a2a4f">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-coral"></a>
+</p>
+
+> **Apple Silicon only.** Orator runs the Kokoro model on the GPU through Apple's [MLX](https://github.com/ml-explore/mlx) framework, which is built exclusively for M-series chips. It will not run on Intel Macs. Anything M1 or newer (every Mac Apple has sold since late 2020) is supported.
+
 **Highlight any text, anywhere on your Mac. Press a key. Hear it read aloud in a beautiful AI voice.**
 
 Orator is a free, open-source menu bar app that reads selected text out loud using the [Kokoro-82M](https://huggingface.co/prince-canuma/Kokoro-82M) neural text-to-speech model - running **entirely on your Mac**. No cloud. No subscription. No account. Nothing leaves your computer, ever.
@@ -29,7 +41,7 @@ Long articles start speaking in about a second: text is split at sentence bounda
 
 ## Requirements
 
-- Apple Silicon Mac (M1 or newer) - the model runs on the GPU via MLX
+- **Apple Silicon Mac (M1 or newer)** - required; the model runs on the GPU via MLX, which has no Intel support
 - macOS 15 (Sequoia) or newer
 - ~400 MB disk space (the voice model is bundled in the app)
 
@@ -82,6 +94,9 @@ Built on [kokoro-ios](https://github.com/mlalma/kokoro-ios) (KokoroSwift),
 [mlx-swift](https://github.com/ml-explore/mlx-swift), and
 [MisakiSwift](https://github.com/mlalma/MisakiSwift) G2P.
 
+## Sibling project
+
+[orator-chrome-extension](https://github.com/MyronKoch/orator-chrome-extension) - the browser-extension version of Orator (reads web pages with Kokoro & Supertonic engines inside Chrome).
 
 ## License
 
