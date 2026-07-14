@@ -6,6 +6,8 @@ import UniformTypeIdentifiers
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
+    static weak var shared: AppDelegate?
+
     // MARK: - State
 
     private var statusItem: NSStatusItem!
@@ -20,12 +22,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var previewAudioPlayer: AVAudioPlayer?
     private var isPreviewRenderInFlight = false
     private var lastReadApp: (bundleID: String, name: String)?
+    private var readingQueue: [String] = []
+    private var queuePlaybackActive = false
+    private var continuousReading: Bool = true
 
     private let defaults = UserDefaults.standard
     private let appProfiles = AppVoiceProfiles()
+    private let history = ReadingHistory()
+    private var rememberHistory: Bool = {
+        let defaults = UserDefaults.standard
+        return defaults.object(forKey: "rememberHistory") == nil
+            ? true
+            : defaults.bool(forKey: "rememberHistory")
+    }()
     private enum Pref {
         static let voice = "voice"
         static let speed = "speed"
+        static let continuousReading = "continuousReading"
+        static let rememberHistory = "rememberHistory"
     }
     private static let speedOptions: [Float] = [0.8, 0.9, 1.0, 1.1, 1.25, 1.5]
 
@@ -36,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Launch
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppDelegate.shared = self
         setupStatusItem()
         loadEngineAsync()
 
@@ -52,6 +67,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(
             forName: .oratorSpeechFinished, object: nil, queue: .main
         ) { [weak self] _ in Task { @MainActor in self?.updateIcon(speaking: false) } }
+        NotificationCenter.default.addObserver(
+            forName: .oratorSpeechFinished, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.queuePlaybackActive else { return }
+                if self.continuousReading {
+                    self.playNextInQueue()
+                } else {
+                    self.queuePlaybackActive = false
+                    self.rebuildMenu()
+                }
+            }
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        cleanupPreviewTempFile()
+    }
+
+    // MARK: - App Intents
+
+    func speakText(_ text: String) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let engine else { return }
+
+        recordHistory(text)
+        DispatchQueue.global(qos: .userInitiated).async {
+            do { try engine.speak(text) }
+            catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
+        }
+    }
+
+    func speakClipboard() {
+        guard let text = NSPasteboard.general.string(forType: .string) else { return }
+        speakText(text)
     }
 
     // MARK: - Engine
@@ -74,6 +124,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     engine.currentVoice = self.defaults.string(forKey: Pref.voice) ?? "af_heart"
                     let savedSpeed = self.defaults.float(forKey: Pref.speed)
                     engine.speed = savedSpeed > 0 ? savedSpeed : 1.0
+                    self.continuousReading = self.defaults.object(forKey: Pref.continuousReading) == nil
+                        ? true
+                        : self.defaults.bool(forKey: Pref.continuousReading)
                     self.rebuildMenu()
                     NSLog("Orator: engine ready (%d voices)", engine.voiceNames.count)
                 }
@@ -128,6 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if engine.isSpeaking {
             oratorLog("toggle: was speaking → stop")
+            queuePlaybackActive = false
             engine.stop()
             return
         }
@@ -153,11 +207,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 engine.speed = globalSpeed
             }
 
+            self.recordHistory(text)
             DispatchQueue.global(qos: .userInitiated).async {
                 do { try engine.speak(text) }
                 catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
             }
         }
+    }
+
+    private func recordHistory(_ text: String) {
+        guard rememberHistory else { return }
+        history.add(text)
+        rebuildMenu()
     }
 
     /// Simulate Cmd+C, read the pasteboard, then restore the user's clipboard.
@@ -314,6 +375,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(pronunciations)
             menu.addItem(.separator())
 
+            let addSelectionToQueue = NSMenuItem(
+                title: "Add Selection to Queue",
+                action: #selector(addSelectionToQueue),
+                keyEquivalent: ""
+            )
+            addSelectionToQueue.target = self
+            menu.addItem(addSelectionToQueue)
+
+            let addClipboardToQueue = NSMenuItem(
+                title: "Add Clipboard to Queue",
+                action: #selector(addClipboardToQueue),
+                keyEquivalent: ""
+            )
+            addClipboardToQueue.target = self
+            menu.addItem(addClipboardToQueue)
+
+            let queueRoot = NSMenuItem(title: "Queue", action: nil, keyEquivalent: "")
+            let queueMenu = NSMenu()
+            let queueCountTitle = readingQueue.isEmpty
+                ? "Empty"
+                : "\(readingQueue.count) \(readingQueue.count == 1 ? "item" : "items")"
+            let queueCount = NSMenuItem(title: queueCountTitle, action: nil, keyEquivalent: "")
+            queueCount.isEnabled = false
+            queueMenu.addItem(queueCount)
+
+            for text in readingQueue {
+                let item = NSMenuItem(title: queueItemTitle(for: text), action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                queueMenu.addItem(item)
+            }
+
+            if queuePlaybackActive || !readingQueue.isEmpty {
+                queueMenu.addItem(.separator())
+            }
+            if !readingQueue.isEmpty && !queuePlaybackActive {
+                let playQueue = NSMenuItem(
+                    title: "Play Queue",
+                    action: #selector(startQueuePlayback),
+                    keyEquivalent: ""
+                )
+                playQueue.target = self
+                queueMenu.addItem(playQueue)
+            }
+            if queuePlaybackActive {
+                let stopQueue = NSMenuItem(
+                    title: "Stop Queue",
+                    action: #selector(stopQueuePlayback),
+                    keyEquivalent: ""
+                )
+                stopQueue.target = self
+                queueMenu.addItem(stopQueue)
+            }
+            if !readingQueue.isEmpty {
+                let clearQueue = NSMenuItem(
+                    title: "Clear Queue",
+                    action: #selector(clearReadingQueue),
+                    keyEquivalent: ""
+                )
+                clearQueue.target = self
+                queueMenu.addItem(clearQueue)
+            }
+            queueRoot.submenu = queueMenu
+            menu.addItem(queueRoot)
+
+            let continuousReadingItem = NSMenuItem(
+                title: "Continuous Reading",
+                action: #selector(toggleContinuousReading),
+                keyEquivalent: ""
+            )
+            continuousReadingItem.target = self
+            continuousReadingItem.state = continuousReading ? .on : .off
+            menu.addItem(continuousReadingItem)
+            menu.addItem(.separator())
+
             let speakClipboard = NSMenuItem(title: "Speak Clipboard", action: #selector(speakClipboardText), keyEquivalent: "")
             speakClipboard.target = self
             menu.addItem(speakClipboard)
@@ -360,6 +495,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(.separator())
         }
 
+        let historyRoot = NSMenuItem(title: "History", action: nil, keyEquivalent: "")
+        let historyMenu = NSMenu()
+        let historyEntries = history.entries
+        if historyEntries.isEmpty {
+            let emptyHistory = NSMenuItem(title: "No recent reads", action: nil, keyEquivalent: "")
+            emptyHistory.isEnabled = false
+            historyMenu.addItem(emptyHistory)
+        } else {
+            for entry in historyEntries.prefix(20) {
+                let item = NSMenuItem(
+                    title: entry.title,
+                    action: #selector(readHistoryEntry(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = entry.text
+                item.isEnabled = engine != nil
+                historyMenu.addItem(item)
+            }
+        }
+        historyMenu.addItem(.separator())
+
+        let rememberHistoryItem = NSMenuItem(
+            title: "Remember Reading History",
+            action: #selector(toggleRememberHistory),
+            keyEquivalent: ""
+        )
+        rememberHistoryItem.target = self
+        rememberHistoryItem.state = rememberHistory ? .on : .off
+        historyMenu.addItem(rememberHistoryItem)
+
+        let clearHistoryItem = NSMenuItem(
+            title: "Clear History",
+            action: #selector(clearHistory),
+            keyEquivalent: ""
+        )
+        clearHistoryItem.target = self
+        historyMenu.addItem(clearHistoryItem)
+
+        historyRoot.submenu = historyMenu
+        menu.addItem(historyRoot)
+        menu.addItem(.separator())
+
         // Login item toggle
         let login = NSMenuItem(title: "Start at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
         login.target = self
@@ -382,10 +560,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return "\(parts[1].capitalized)  (\(accent) \(gender))"
     }
 
+    private func queueItemTitle(for text: String) -> String {
+        let singleLine = text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        let prefix = String(singleLine.prefix(40))
+        return singleLine.count > 40 ? "\(prefix)…" : prefix
+    }
+
     // MARK: - Menu actions
 
     @objc private func selectVoice(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String, let engine = engine else { return }
+        queuePlaybackActive = false
         engine.stop()
         engine.currentVoice = name
         defaults.set(name, forKey: Pref.voice)
@@ -478,13 +663,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
-    @objc private func speakClipboardText() {
-        guard let engine = engine,
-              let text = NSPasteboard.general.string(forType: .string) else { return }
+    @objc private func addSelectionToQueue() {
+        captureSelectedText { [weak self] text in
+            self?.addToReadingQueue(text)
+        }
+    }
+
+    @objc private func addClipboardToQueue() {
+        addToReadingQueue(NSPasteboard.general.string(forType: .string))
+    }
+
+    @objc private func toggleContinuousReading() {
+        continuousReading.toggle()
+        defaults.set(continuousReading, forKey: Pref.continuousReading)
+        rebuildMenu()
+    }
+
+    @objc private func readHistoryEntry(_ sender: NSMenuItem) {
+        guard let engine, let text = sender.representedObject as? String else { return }
         DispatchQueue.global(qos: .userInitiated).async {
             do { try engine.speak(text) }
-            catch { NSLog("Orator: speak failed: %@", error.localizedDescription) }
+            catch { oratorLog("history speak FAILED: \(error.localizedDescription)") }
         }
+    }
+
+    @objc private func toggleRememberHistory() {
+        rememberHistory.toggle()
+        defaults.set(rememberHistory, forKey: Pref.rememberHistory)
+        rebuildMenu()
+    }
+
+    @objc private func clearHistory() {
+        history.clear()
+        rebuildMenu()
+    }
+
+    private func addToReadingQueue(_ text: String?) {
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            showNotification("Nothing to queue", body: "Select or copy some text first.")
+            return
+        }
+
+        readingQueue.append(text)
+        if engine?.isSpeaking == false && !queuePlaybackActive {
+            startQueuePlayback()
+        } else {
+            rebuildMenu()
+        }
+    }
+
+    @objc private func startQueuePlayback() {
+        queuePlaybackActive = true
+        playNextInQueue()
+    }
+
+    private func playNextInQueue() {
+        guard !readingQueue.isEmpty else {
+            queuePlaybackActive = false
+            rebuildMenu()
+            return
+        }
+        guard let engine else {
+            queuePlaybackActive = false
+            rebuildMenu()
+            return
+        }
+
+        let text = readingQueue.removeFirst()
+        DispatchQueue.global(qos: .userInitiated).async {
+            do { try engine.speak(text) }
+            catch { oratorLog("queue speak FAILED: \(error.localizedDescription)") }
+        }
+        rebuildMenu()
+    }
+
+    @objc private func stopQueuePlayback() {
+        queuePlaybackActive = false
+        engine?.stop()
+        rebuildMenu()
+    }
+
+    @objc private func clearReadingQueue() {
+        readingQueue.removeAll()
+        rebuildMenu()
+    }
+
+    @objc private func speakClipboardText() {
+        speakClipboard()
     }
 
     @objc private func readFile() {
@@ -502,6 +767,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let text = try FileTextExtractor.extractText(from: url)
                     DispatchQueue.main.async {
                         guard let engine = self.engine else { return }
+                        self.recordHistory(text)
                         DispatchQueue.global(qos: .userInitiated).async {
                             do { try engine.speak(text) }
                             catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
@@ -636,8 +902,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func stopSpeaking() {
+    @objc func stopSpeaking() {
+        queuePlaybackActive = false
         engine?.stop()
+        rebuildMenu()
     }
 
     @objc private func openOnboarding() {
@@ -646,8 +914,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func quit() {
+        queuePlaybackActive = false
         engine?.stop()
+        cleanupPreviewTempFile()
         NSApp.terminate(nil)
+    }
+
+    private func cleanupPreviewTempFile() {
+        previewAudioPlayer?.stop()
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("orator-preview.m4a")
+        if FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     // MARK: - Onboarding window
