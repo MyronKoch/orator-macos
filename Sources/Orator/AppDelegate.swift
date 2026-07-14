@@ -318,6 +318,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             speakClipboard.target = self
             menu.addItem(speakClipboard)
 
+            let readFile = NSMenuItem(
+                title: "Read File…",
+                action: #selector(readFile),
+                keyEquivalent: ""
+            )
+            readFile.target = self
+            menu.addItem(readFile)
+
             let exportSelection = NSMenuItem(
                 title: "Export Selection to Audio…",
                 action: #selector(exportSelectionToAudio),
@@ -333,6 +341,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             exportClipboard.target = self
             menu.addItem(exportClipboard)
+
+            let exportFile = NSMenuItem(
+                title: "Export File to Audio…",
+                action: #selector(exportFileToAudio),
+                keyEquivalent: ""
+            )
+            exportFile.target = self
+            menu.addItem(exportFile)
 
             let speakTest = NSMenuItem(title: "Speak Test Sentence", action: #selector(speakTestSentence), keyEquivalent: "")
             speakTest.target = self
@@ -471,6 +487,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func readFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = FileTextExtractor.supportedTypes
+        panel.allowsMultipleSelection = false
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else { return }
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let text = try FileTextExtractor.extractText(from: url)
+                    DispatchQueue.main.async {
+                        guard let engine = self.engine else { return }
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            do { try engine.speak(text) }
+                            catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
+                        }
+                    }
+                } catch {
+                    let message = error.localizedDescription
+                    DispatchQueue.main.async {
+                        self.showNotification("Couldn’t read file", body: message)
+                    }
+                }
+            }
+        }
+    }
+
     @objc private func exportSelectionToAudio() {
         captureSelectedText { [weak self] text in
             self?.exportToAudio(text)
@@ -479,6 +525,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func exportClipboardToAudio() {
         exportToAudio(NSPasteboard.general.string(forType: .string))
+    }
+
+    @objc private func exportFileToAudio() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = FileTextExtractor.supportedTypes
+        panel.allowsMultipleSelection = false
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else { return }
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let text = try FileTextExtractor.extractText(from: url)
+                    DispatchQueue.main.async {
+                        self.exportToAudio(text)
+                    }
+                } catch {
+                    let message = error.localizedDescription
+                    DispatchQueue.main.async {
+                        self.showNotification("Couldn’t read file", body: message)
+                    }
+                }
+            }
+        }
     }
 
     private func exportToAudio(_ text: String?) {
