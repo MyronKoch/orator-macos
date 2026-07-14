@@ -54,6 +54,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in Task { @MainActor in self?.updateIcon(speaking: false) } }
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        cleanupPreviewTempFile()
+    }
+
     // MARK: - Engine
 
     private func loadEngineAsync() {
@@ -647,7 +651,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         engine?.stop()
+        cleanupPreviewTempFile()
         NSApp.terminate(nil)
+    }
+
+    private func cleanupPreviewTempFile() {
+        previewAudioPlayer?.stop()
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("orator-preview.m4a")
+        if FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     // MARK: - Onboarding window
