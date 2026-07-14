@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         static let voice = "voice"
         static let speed = "speed"
     }
+    private static let speedOptions: [Float] = [0.8, 0.9, 1.0, 1.1, 1.25, 1.5]
 
     // Option + ' (US keyboard apostrophe = keyCode 39)
     private let hotKeyCode: UInt16 = 39
@@ -263,7 +264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Speed picker
             let speedRoot = NSMenuItem(title: "Speed", action: nil, keyEquivalent: "")
             let speedMenu = NSMenu()
-            for value in [Float(0.8), 0.9, 1.0, 1.1, 1.25, 1.5] {
+            for value in Self.speedOptions {
                 let item = NSMenuItem(title: String(format: "%.2gx", value), action: #selector(selectSpeed(_:)), keyEquivalent: "")
                 item.representedObject = value
                 item.target = self
@@ -407,7 +408,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openPerAppVoices() {
         if appVoiceProfilesEditor == nil {
-            appVoiceProfilesEditor = AppVoiceProfilesEditor(profiles: appProfiles) { [weak self] in
+            appVoiceProfilesEditor = AppVoiceProfilesEditor(
+                profiles: appProfiles,
+                voiceNames: engine?.voiceNames ?? [],
+                speedOptions: Self.speedOptions
+            ) { [weak self] in
                 self?.rebuildMenu()
             }
         }
@@ -634,13 +639,22 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
     }
 
     private let profiles: AppVoiceProfiles
+    private let voiceNames: [String]
+    private let speedOptions: [Float]
     private let onChange: @MainActor () -> Void
     private let window: NSWindow
     private let tableView = NSTableView()
     private var rows: [(bundleID: String, profile: Profile)]
 
-    init(profiles: AppVoiceProfiles, onChange: @escaping @MainActor () -> Void) {
+    init(
+        profiles: AppVoiceProfiles,
+        voiceNames: [String],
+        speedOptions: [Float],
+        onChange: @escaping @MainActor () -> Void
+    ) {
         self.profiles = profiles
+        self.voiceNames = voiceNames
+        self.speedOptions = speedOptions
         self.onChange = onChange
         rows = profiles.all
         window = NSWindow(
@@ -679,7 +693,7 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         heading.font = .systemFont(ofSize: 20, weight: .semibold)
 
         let body = NSTextField(wrappingLabelWithString:
-            "Use the Orator menu after reading from an app to save its current voice and speed."
+            "Add a running app, then choose the voice and speed Orator should use for it."
         )
         body.font = .systemFont(ofSize: 13)
         body.textColor = .secondaryLabelColor
@@ -724,9 +738,13 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         scrollView.widthAnchor.constraint(equalToConstant: 612).isActive = true
         scrollView.heightAnchor.constraint(equalToConstant: 240).isActive = true
 
+        let addButton = NSButton(title: "Add App…", target: self, action: #selector(showAddAppMenu(_:)))
+        addButton.bezelStyle = .rounded
+
         content.addArrangedSubview(heading)
         content.addArrangedSubview(body)
         content.addArrangedSubview(scrollView)
+        content.addArrangedSubview(addButton)
 
         window.contentView = content
     }
@@ -746,16 +764,125 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
             return button
         }
 
+        if identifier == Column.voice {
+            let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+            let currentVoice = rows[row].profile.voice
+            var availableVoices = voiceNames
+            if !availableVoices.contains(currentVoice) {
+                availableVoices.append(currentVoice)
+            }
+            popup.addItems(withTitles: availableVoices)
+            popup.selectItem(withTitle: currentVoice)
+            popup.target = self
+            popup.action = #selector(changeVoice(_:))
+            popup.tag = row
+            popup.controlSize = .small
+            return popup
+        }
+
+        if identifier == Column.speed {
+            let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+            let currentSpeed = rows[row].profile.speed
+            var availableSpeeds = speedOptions
+            if !availableSpeeds.contains(where: { abs($0 - currentSpeed) < 0.001 }) {
+                availableSpeeds.append(currentSpeed)
+            }
+            for speed in availableSpeeds {
+                let item = NSMenuItem(title: String(format: "%.2gx", speed), action: nil, keyEquivalent: "")
+                item.representedObject = speed
+                popup.menu?.addItem(item)
+            }
+            if let selectedIndex = availableSpeeds.firstIndex(where: { abs($0 - currentSpeed) < 0.001 }) {
+                popup.selectItem(at: selectedIndex)
+            }
+            popup.target = self
+            popup.action = #selector(changeSpeed(_:))
+            popup.tag = row
+            popup.controlSize = .small
+            return popup
+        }
+
         let field = NSTextField(labelWithString: "")
         field.lineBreakMode = .byTruncatingTail
         if identifier == Column.app {
             field.stringValue = rows[row].profile.appName
-        } else if identifier == Column.voice {
-            field.stringValue = rows[row].profile.voice
-        } else {
-            field.stringValue = String(format: "%.2gx", rows[row].profile.speed)
         }
         return field
+    }
+
+    @objc private func showAddAppMenu(_ sender: NSButton) {
+        let existingBundleIDs = Set(rows.map { $0.bundleID })
+        let ownBundleID = Bundle.main.bundleIdentifier
+        var seenBundleIDs = existingBundleIDs
+        let apps = NSWorkspace.shared.runningApplications.compactMap { app -> (bundleID: String, name: String)? in
+            guard app.activationPolicy == .regular,
+                  let bundleID = app.bundleIdentifier,
+                  let name = app.localizedName,
+                  bundleID != ownBundleID,
+                  seenBundleIDs.insert(bundleID).inserted else { return nil }
+            return (bundleID, name)
+        }.sorted {
+            let order = $0.name.localizedCaseInsensitiveCompare($1.name)
+            return order == .orderedSame ? $0.bundleID < $1.bundleID : order == .orderedAscending
+        }
+
+        let menu = NSMenu()
+        for app in apps {
+            let item = NSMenuItem(title: app.name, action: #selector(addApp(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = app.bundleID
+            menu.addItem(item)
+        }
+        if menu.items.isEmpty {
+            let item = NSMenuItem(title: "No Running Apps Available", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY), in: sender)
+    }
+
+    @objc private func addApp(_ sender: NSMenuItem) {
+        guard let bundleID = sender.representedObject as? String else { return }
+        profiles.set(
+            bundleID: bundleID,
+            appName: sender.title,
+            voice: voiceNames.first ?? "af_heart",
+            speed: 1.0
+        )
+        reload()
+        if let row = rows.firstIndex(where: { $0.bundleID == bundleID }) {
+            tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            tableView.scrollRowToVisible(row)
+        }
+        onChange()
+    }
+
+    @objc private func changeVoice(_ sender: NSPopUpButton) {
+        guard rows.indices.contains(sender.tag),
+              let voice = sender.titleOfSelectedItem else { return }
+        let row = rows[sender.tag]
+        profiles.set(
+            bundleID: row.bundleID,
+            appName: row.profile.appName,
+            voice: voice,
+            speed: row.profile.speed
+        )
+        reload()
+        onChange()
+    }
+
+    @objc private func changeSpeed(_ sender: NSPopUpButton) {
+        guard rows.indices.contains(sender.tag),
+              let speed = sender.selectedItem?.representedObject as? Float else { return }
+        let row = rows[sender.tag]
+        profiles.set(
+            bundleID: row.bundleID,
+            appName: row.profile.appName,
+            voice: row.profile.voice,
+            speed: speed
+        )
+        reload()
+        onChange()
     }
 
     @objc private func removeProfile(_ sender: NSButton) {
