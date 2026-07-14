@@ -110,13 +110,14 @@ final class OratorEngine: @unchecked Sendable {
     func synthesizeToFile(
         _ text: String,
         voiceName: String? = nil,
+        speed: Float? = nil,
         to url: URL,
         progress: (@Sendable (Double) -> Void)? = nil,
         completion: @escaping @Sendable (Result<URL, Error>) -> Void
     ) {
         let chunks = TextChunker.chunk(text)
         let voiceKey = voiceName ?? currentVoice
-        let spd = self.speed
+        let spd = speed ?? self.speed
 
         synthQueue.async { [self] in
             func finish(_ result: Result<URL, Error>) {
@@ -135,30 +136,37 @@ final class OratorEngine: @unchecked Sendable {
                     AVNumberOfChannelsKey: 1,
                     AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
                 ]
-                let file = try AVAudioFile(forWriting: url, settings: settings)
-                let writeFormat = file.processingFormat
+                // Write + finalize inside a nested scope so the AVAudioFile is
+                // fully released (m4a container finalized and flushed to disk)
+                // BEFORE we report success. Otherwise a reader that opens the
+                // file immediately on completion sees an unfinalized container
+                // and fails with kAudioFileUnsupportedDataFormatError.
+                do {
+                    let file = try AVAudioFile(forWriting: url, settings: settings)
+                    let writeFormat = file.processingFormat
 
-                let total = chunks.count
-                for (index, chunk) in chunks.enumerated() {
-                    let (samples, _) = try tts.generateAudio(
-                        voice: voice, language: language, text: chunk, speed: spd
-                    )
-                    if !samples.isEmpty,
-                       let buffer = AVAudioPCMBuffer(
-                           pcmFormat: writeFormat,
-                           frameCapacity: AVAudioFrameCount(samples.count)
-                       ) {
-                        buffer.frameLength = buffer.frameCapacity
-                        samples.withUnsafeBufferPointer { src in
-                            UnsafeMutableRawPointer(buffer.floatChannelData![0]).copyMemory(
-                                from: UnsafeRawPointer(src.baseAddress!),
-                                byteCount: src.count * MemoryLayout<Float>.stride
-                            )
+                    let total = chunks.count
+                    for (index, chunk) in chunks.enumerated() {
+                        let (samples, _) = try tts.generateAudio(
+                            voice: voice, language: language, text: chunk, speed: spd
+                        )
+                        if !samples.isEmpty,
+                           let buffer = AVAudioPCMBuffer(
+                               pcmFormat: writeFormat,
+                               frameCapacity: AVAudioFrameCount(samples.count)
+                           ) {
+                            buffer.frameLength = buffer.frameCapacity
+                            samples.withUnsafeBufferPointer { src in
+                                UnsafeMutableRawPointer(buffer.floatChannelData![0]).copyMemory(
+                                    from: UnsafeRawPointer(src.baseAddress!),
+                                    byteCount: src.count * MemoryLayout<Float>.stride
+                                )
+                            }
+                            try file.write(from: buffer)
                         }
-                        try file.write(from: buffer)
+                        let fraction = Double(index + 1) / Double(total)
+                        if let progress { DispatchQueue.main.async { progress(fraction) } }
                     }
-                    let fraction = Double(index + 1) / Double(total)
-                    if let progress { DispatchQueue.main.async { progress(fraction) } }
                 }
                 finish(.success(url))
             } catch {
