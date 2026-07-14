@@ -12,7 +12,7 @@ enum TextChunker {
 
     /// Normalize whitespace/newlines, then split into speakable chunks.
     static func chunk(_ raw: String) -> [String] {
-        var text = normalize(raw)
+        var text = normalize(ReadableText.clean(raw))
         text = Pronunciations.shared.apply(to: text)
         guard !text.isEmpty else { return [] }
 
