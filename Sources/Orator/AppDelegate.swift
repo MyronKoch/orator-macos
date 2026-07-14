@@ -15,8 +15,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingWindow: NSWindow?
     private var onboardingStatusLabel: NSTextField?
     private var pronunciationsEditor: PronunciationsEditor?
+    private var appVoiceProfilesEditor: AppVoiceProfilesEditor?
+    private var lastReadApp: (bundleID: String, name: String)?
 
     private let defaults = UserDefaults.standard
+    private let appProfiles = AppVoiceProfiles()
     private enum Pref {
         static let voice = "voice"
         static let speed = "speed"
@@ -108,6 +111,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Speak toggle
 
     private func toggleSpeech() {
+        if let application = NSWorkspace.shared.frontmostApplication,
+           let bundleID = application.bundleIdentifier,
+           let name = application.localizedName {
+            lastReadApp = (bundleID: bundleID, name: name)
+        } else {
+            lastReadApp = nil
+        }
+        let readApp = lastReadApp
+
         guard let engine = engine else { oratorLog("toggle: engine nil"); return }
 
         if engine.isSpeaking {
@@ -124,6 +136,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             oratorLog("capture: got \(text.count) chars — speaking")
+
+            let globalVoice = self.defaults.string(forKey: Pref.voice) ?? "af_heart"
+            let savedSpeed = self.defaults.float(forKey: Pref.speed)
+            let globalSpeed = savedSpeed == 0 ? Float(1.0) : savedSpeed
+            if let bundleID = readApp?.bundleID,
+               let profile = self.appProfiles.profile(for: bundleID) {
+                engine.currentVoice = profile.voice
+                engine.speed = profile.speed
+            } else {
+                engine.currentVoice = globalVoice
+                engine.speed = globalSpeed
+            }
+
             DispatchQueue.global(qos: .userInitiated).async {
                 do { try engine.speak(text) }
                 catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
@@ -248,6 +273,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             speedRoot.submenu = speedMenu
             menu.addItem(speedRoot)
 
+            if let app = lastReadApp {
+                let saveProfile = NSMenuItem(
+                    title: "Use current voice for \(app.name)",
+                    action: #selector(saveVoiceForLastReadApp),
+                    keyEquivalent: ""
+                )
+                saveProfile.target = self
+                menu.addItem(saveProfile)
+
+                if appProfiles.profile(for: app.bundleID) != nil {
+                    let clearProfile = NSMenuItem(
+                        title: "Clear voice for \(app.name)",
+                        action: #selector(clearVoiceForLastReadApp),
+                        keyEquivalent: ""
+                    )
+                    clearProfile.target = self
+                    menu.addItem(clearProfile)
+                }
+            }
+
+            let perAppVoices = NSMenuItem(
+                title: "Per-App Voices…",
+                action: #selector(openPerAppVoices),
+                keyEquivalent: ""
+            )
+            perAppVoices.target = self
+            menu.addItem(perAppVoices)
+
             let pronunciations = NSMenuItem(
                 title: "Pronunciations…",
                 action: #selector(openPronunciations),
@@ -331,6 +384,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pronunciationsEditor = PronunciationsEditor(pronunciations: .shared)
         }
         pronunciationsEditor?.show()
+    }
+
+    @objc private func saveVoiceForLastReadApp() {
+        guard let app = lastReadApp, let engine = engine else { return }
+        appProfiles.set(
+            bundleID: app.bundleID,
+            appName: app.name,
+            voice: engine.currentVoice,
+            speed: engine.speed
+        )
+        appVoiceProfilesEditor?.reload()
+        rebuildMenu()
+    }
+
+    @objc private func clearVoiceForLastReadApp() {
+        guard let app = lastReadApp else { return }
+        appProfiles.remove(bundleID: app.bundleID)
+        appVoiceProfilesEditor?.reload()
+        rebuildMenu()
+    }
+
+    @objc private func openPerAppVoices() {
+        if appVoiceProfilesEditor == nil {
+            appVoiceProfilesEditor = AppVoiceProfilesEditor(profiles: appProfiles) { [weak self] in
+                self?.rebuildMenu()
+            }
+        }
+        appVoiceProfilesEditor?.show()
     }
 
     @objc private func toggleLoginItem() {
@@ -537,6 +618,151 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openAccessibilitySettings() {
         let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
         NSWorkspace.shared.open(url)
+    }
+}
+
+// MARK: - Per-app voices window
+
+@MainActor
+private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+
+    private enum Column {
+        static let app = NSUserInterfaceItemIdentifier("appVoiceProfileApp")
+        static let voice = NSUserInterfaceItemIdentifier("appVoiceProfileVoice")
+        static let speed = NSUserInterfaceItemIdentifier("appVoiceProfileSpeed")
+        static let remove = NSUserInterfaceItemIdentifier("appVoiceProfileRemove")
+    }
+
+    private let profiles: AppVoiceProfiles
+    private let onChange: @MainActor () -> Void
+    private let window: NSWindow
+    private let tableView = NSTableView()
+    private var rows: [(bundleID: String, profile: Profile)]
+
+    init(profiles: AppVoiceProfiles, onChange: @escaping @MainActor () -> Void) {
+        self.profiles = profiles
+        self.onChange = onChange
+        rows = profiles.all
+        window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 660, height: 390),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        super.init()
+        configureWindow()
+    }
+
+    func show() {
+        reload()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func reload() {
+        rows = profiles.all
+        tableView.reloadData()
+    }
+
+    private func configureWindow() {
+        window.title = "Per-App Voices"
+        window.center()
+        window.isReleasedWhenClosed = false
+
+        let content = NSStackView()
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 12
+        content.edgeInsets = NSEdgeInsets(top: 22, left: 24, bottom: 22, right: 24)
+
+        let heading = NSTextField(labelWithString: "Per-App Voices")
+        heading.font = .systemFont(ofSize: 20, weight: .semibold)
+
+        let body = NSTextField(wrappingLabelWithString:
+            "Use the Orator menu after reading from an app to save its current voice and speed."
+        )
+        body.font = .systemFont(ofSize: 13)
+        body.textColor = .secondaryLabelColor
+        body.preferredMaxLayoutWidth = 612
+
+        let appColumn = NSTableColumn(identifier: Column.app)
+        appColumn.title = "App"
+        appColumn.width = 220
+        appColumn.minWidth = 140
+
+        let voiceColumn = NSTableColumn(identifier: Column.voice)
+        voiceColumn.title = "Voice"
+        voiceColumn.width = 190
+        voiceColumn.minWidth = 120
+
+        let speedColumn = NSTableColumn(identifier: Column.speed)
+        speedColumn.title = "Speed"
+        speedColumn.width = 80
+        speedColumn.minWidth = 60
+
+        let removeColumn = NSTableColumn(identifier: Column.remove)
+        removeColumn.title = "Remove"
+        removeColumn.width = 90
+        removeColumn.minWidth = 80
+
+        tableView.addTableColumn(appColumn)
+        tableView.addTableColumn(voiceColumn)
+        tableView.addTableColumn(speedColumn)
+        tableView.addTableColumn(removeColumn)
+        tableView.dataSource = self
+        tableView.delegate = self
+        tableView.headerView = NSTableHeaderView()
+        tableView.rowHeight = 30
+        tableView.usesAlternatingRowBackgroundColors = true
+        tableView.allowsMultipleSelection = false
+        tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+
+        let scrollView = NSScrollView()
+        scrollView.documentView = tableView
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .bezelBorder
+        scrollView.widthAnchor.constraint(equalToConstant: 612).isActive = true
+        scrollView.heightAnchor.constraint(equalToConstant: 240).isActive = true
+
+        content.addArrangedSubview(heading)
+        content.addArrangedSubview(body)
+        content.addArrangedSubview(scrollView)
+
+        window.contentView = content
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        rows.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard rows.indices.contains(row), let identifier = tableColumn?.identifier else { return nil }
+
+        if identifier == Column.remove {
+            let button = NSButton(title: "Remove", target: self, action: #selector(removeProfile(_:)))
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.tag = row
+            return button
+        }
+
+        let field = NSTextField(labelWithString: "")
+        field.lineBreakMode = .byTruncatingTail
+        if identifier == Column.app {
+            field.stringValue = rows[row].profile.appName
+        } else if identifier == Column.voice {
+            field.stringValue = rows[row].profile.voice
+        } else {
+            field.stringValue = String(format: "%.2gx", rows[row].profile.speed)
+        }
+        return field
+    }
+
+    @objc private func removeProfile(_ sender: NSButton) {
+        guard rows.indices.contains(sender.tag) else { return }
+        profiles.remove(bundleID: rows[sender.tag].bundleID)
+        reload()
+        onChange()
     }
 }
 
