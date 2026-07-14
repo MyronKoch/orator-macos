@@ -287,7 +287,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let title = NSMenuItem(title: "Orator", action: nil, keyEquivalent: "")
         title.isEnabled = false
         menu.addItem(title)
-        menu.addItem(.separator())
 
         // Status line
         let status: String
@@ -311,69 +310,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menu.addItem(.separator())
 
-        // Voice picker
-        if let engine = engine {
-            let voiceRoot = NSMenuItem(title: "Voice", action: nil, keyEquivalent: "")
-            let voiceMenu = NSMenu()
-            for name in engine.voiceNames {
-                let item = NSMenuItem(title: displayName(for: name), action: #selector(selectVoice(_:)), keyEquivalent: "")
-                item.representedObject = name
-                item.target = self
-                item.state = name == engine.currentVoice ? .on : .off
-                voiceMenu.addItem(item)
-            }
-            voiceRoot.submenu = voiceMenu
-            menu.addItem(voiceRoot)
-
-            // Speed picker
-            let speedRoot = NSMenuItem(title: "Speed", action: nil, keyEquivalent: "")
-            let speedMenu = NSMenu()
-            for value in Self.speedOptions {
-                let item = NSMenuItem(title: String(format: "%.2gx", value), action: #selector(selectSpeed(_:)), keyEquivalent: "")
-                item.representedObject = value
-                item.target = self
-                item.state = abs(engine.speed - value) < 0.01 ? .on : .off
-                speedMenu.addItem(item)
-            }
-            speedRoot.submenu = speedMenu
-            menu.addItem(speedRoot)
-
-            if let app = lastReadApp {
-                let saveProfile = NSMenuItem(
-                    title: "Use current voice for \(app.name)",
-                    action: #selector(saveVoiceForLastReadApp),
-                    keyEquivalent: ""
-                )
-                saveProfile.target = self
-                menu.addItem(saveProfile)
-
-                if appProfiles.profile(for: app.bundleID) != nil {
-                    let clearProfile = NSMenuItem(
-                        title: "Clear voice for \(app.name)",
-                        action: #selector(clearVoiceForLastReadApp),
-                        keyEquivalent: ""
-                    )
-                    clearProfile.target = self
-                    menu.addItem(clearProfile)
-                }
-            }
-
-            let perAppVoices = NSMenuItem(
-                title: "Per-App Voices…",
-                action: #selector(openPerAppVoices),
+        if engine != nil {
+            let readFile = NSMenuItem(
+                title: "Read File…",
+                action: #selector(readFile),
                 keyEquivalent: ""
             )
-            perAppVoices.target = self
-            menu.addItem(perAppVoices)
+            readFile.target = self
+            menu.addItem(readFile)
 
-            let pronunciations = NSMenuItem(
-                title: "Pronunciations…",
-                action: #selector(openPronunciations),
-                keyEquivalent: ""
-            )
-            pronunciations.target = self
-            menu.addItem(pronunciations)
+            let speakClipboard = NSMenuItem(title: "Speak Clipboard", action: #selector(speakClipboardText), keyEquivalent: "")
+            speakClipboard.target = self
+            menu.addItem(speakClipboard)
+
+            let stopItem = NSMenuItem(title: "Stop Speaking", action: #selector(stopSpeaking), keyEquivalent: "")
+            stopItem.target = self
+            menu.addItem(stopItem)
             menu.addItem(.separator())
+
+            let queueRoot = NSMenuItem(title: "Queue", action: nil, keyEquivalent: "")
+            let queueMenu = NSMenu()
 
             let addSelectionToQueue = NSMenuItem(
                 title: "Add Selection to Queue",
@@ -381,7 +337,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 keyEquivalent: ""
             )
             addSelectionToQueue.target = self
-            menu.addItem(addSelectionToQueue)
+            queueMenu.addItem(addSelectionToQueue)
 
             let addClipboardToQueue = NSMenuItem(
                 title: "Add Clipboard to Queue",
@@ -389,10 +345,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 keyEquivalent: ""
             )
             addClipboardToQueue.target = self
-            menu.addItem(addClipboardToQueue)
+            queueMenu.addItem(addClipboardToQueue)
+            queueMenu.addItem(.separator())
 
-            let queueRoot = NSMenuItem(title: "Queue", action: nil, keyEquivalent: "")
-            let queueMenu = NSMenu()
             let queueCountTitle = readingQueue.isEmpty
                 ? "Empty"
                 : "\(readingQueue.count) \(readingQueue.count == 1 ? "item" : "items")"
@@ -436,8 +391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 clearQueue.target = self
                 queueMenu.addItem(clearQueue)
             }
-            queueRoot.submenu = queueMenu
-            menu.addItem(queueRoot)
+            queueMenu.addItem(.separator())
 
             let continuousReadingItem = NSMenuItem(
                 title: "Continuous Reading",
@@ -446,28 +400,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             continuousReadingItem.target = self
             continuousReadingItem.state = continuousReading ? .on : .off
-            menu.addItem(continuousReadingItem)
-            menu.addItem(.separator())
+            queueMenu.addItem(continuousReadingItem)
+            queueRoot.submenu = queueMenu
+            menu.addItem(queueRoot)
 
-            let speakClipboard = NSMenuItem(title: "Speak Clipboard", action: #selector(speakClipboardText), keyEquivalent: "")
-            speakClipboard.target = self
-            menu.addItem(speakClipboard)
-
-            let readFile = NSMenuItem(
-                title: "Read File…",
-                action: #selector(readFile),
-                keyEquivalent: ""
-            )
-            readFile.target = self
-            menu.addItem(readFile)
-
+            let exportRoot = NSMenuItem(title: "Export", action: nil, keyEquivalent: "")
+            let exportMenu = NSMenu()
             let exportSelection = NSMenuItem(
                 title: "Export Selection to Audio…",
                 action: #selector(exportSelectionToAudio),
                 keyEquivalent: ""
             )
             exportSelection.target = self
-            menu.addItem(exportSelection)
+            exportMenu.addItem(exportSelection)
 
             let exportClipboard = NSMenuItem(
                 title: "Export Clipboard to Audio…",
@@ -475,7 +420,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 keyEquivalent: ""
             )
             exportClipboard.target = self
-            menu.addItem(exportClipboard)
+            exportMenu.addItem(exportClipboard)
 
             let exportFile = NSMenuItem(
                 title: "Export File to Audio…",
@@ -483,16 +428,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 keyEquivalent: ""
             )
             exportFile.target = self
-            menu.addItem(exportFile)
-
-            let speakTest = NSMenuItem(title: "Speak Test Sentence", action: #selector(speakTestSentence), keyEquivalent: "")
-            speakTest.target = self
-            menu.addItem(speakTest)
-
-            let stopItem = NSMenuItem(title: "Stop Speaking", action: #selector(stopSpeaking), keyEquivalent: "")
-            stopItem.target = self
-            menu.addItem(stopItem)
-            menu.addItem(.separator())
+            exportMenu.addItem(exportFile)
+            exportRoot.submenu = exportMenu
+            menu.addItem(exportRoot)
         }
 
         let historyRoot = NSMenuItem(title: "History", action: nil, keyEquivalent: "")
@@ -538,13 +476,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(historyRoot)
         menu.addItem(.separator())
 
+        if let engine = engine {
+            // Voice picker
+            let voiceRoot = NSMenuItem(title: "Voice", action: nil, keyEquivalent: "")
+            let voiceMenu = NSMenu()
+            for name in engine.voiceNames {
+                let item = NSMenuItem(title: displayName(for: name), action: #selector(selectVoice(_:)), keyEquivalent: "")
+                item.representedObject = name
+                item.target = self
+                item.state = name == engine.currentVoice ? .on : .off
+                voiceMenu.addItem(item)
+            }
+            voiceRoot.submenu = voiceMenu
+            menu.addItem(voiceRoot)
+
+            // Speed picker
+            let speedRoot = NSMenuItem(title: "Speed", action: nil, keyEquivalent: "")
+            let speedMenu = NSMenu()
+            for value in Self.speedOptions {
+                let item = NSMenuItem(title: String(format: "%.2gx", value), action: #selector(selectSpeed(_:)), keyEquivalent: "")
+                item.representedObject = value
+                item.target = self
+                item.state = abs(engine.speed - value) < 0.01 ? .on : .off
+                speedMenu.addItem(item)
+            }
+            speedRoot.submenu = speedMenu
+            menu.addItem(speedRoot)
+
+            let pronunciations = NSMenuItem(
+                title: "Pronunciations…",
+                action: #selector(openPronunciations),
+                keyEquivalent: ""
+            )
+            pronunciations.target = self
+            menu.addItem(pronunciations)
+
+            let perAppVoices = NSMenuItem(
+                title: "Per-App Voices…",
+                action: #selector(openPerAppVoices),
+                keyEquivalent: ""
+            )
+            perAppVoices.target = self
+            menu.addItem(perAppVoices)
+
+            if let app = lastReadApp {
+                let saveProfile = NSMenuItem(
+                    title: "Use current voice for \(app.name)",
+                    action: #selector(saveVoiceForLastReadApp),
+                    keyEquivalent: ""
+                )
+                saveProfile.target = self
+                menu.addItem(saveProfile)
+
+                if appProfiles.profile(for: app.bundleID) != nil {
+                    let clearProfile = NSMenuItem(
+                        title: "Clear voice for \(app.name)",
+                        action: #selector(clearVoiceForLastReadApp),
+                        keyEquivalent: ""
+                    )
+                    clearProfile.target = self
+                    menu.addItem(clearProfile)
+                }
+            }
+            menu.addItem(.separator())
+
+            let speakTest = NSMenuItem(title: "Speak Test Sentence", action: #selector(speakTestSentence), keyEquivalent: "")
+            speakTest.target = self
+            menu.addItem(speakTest)
+            menu.addItem(.separator())
+        }
+
         // Login item toggle
         let login = NSMenuItem(title: "Start at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
         login.target = self
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
 
-        menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Orator", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
