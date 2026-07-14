@@ -6,6 +6,12 @@ This roadmap is about what local, on-device AI *unlocks* beyond that. Cloud text
 
 The design rule for everything below: **additive and isolated.** The working highlight → hotkey → Kokoro path is never touched. Every capability is a feature-flagged stage or a separate window, built around the core, never through it.
 
+## What Orator is (and isn't)
+
+Orator lives in one lane: **helping you consume text as audio.** Reading, listening, accessibility, focus, turning the web and your documents into something you can hear. Everything on this roadmap serves that.
+
+Orator is deliberately *not* a voice-production tool. It does not do dictation (speech to text), and it does not do voice cloning. Those are a different craft with their own excellent tools; Orator stays out of that space entirely. The line is simple: **Orator turns text into listening, not voice into text.**
+
 ---
 
 ## Tier 1 — Craft
@@ -40,9 +46,9 @@ Turns a utility into a daily habit.
 
 ## Tier 5 — Moonshots
 
-- **Local voice cloning** — sample a voice, read anything in it. Private, because it's local.
-- **Multilingual auto-switch** — detect the language, pick the matching voice.
-- **Conversational** — select text, ask a question about it, hear the answer (local LLM + TTS in one loop).
+- **Multilingual auto-switch** — detect the language of the selection and pick the matching voice automatically.
+- **Ask-and-hear** — select a passage, ask a question about it, hear the answer read back (local LLM + TTS). A reading-comprehension aid, not a voice assistant: text in, understanding out, spoken.
+- **Continuous listening mode** — hands-free reading of a queue or a long document with automatic advance, for eyes-off consumption (commute, chores, accessibility).
 
 ---
 

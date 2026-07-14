@@ -13,12 +13,14 @@ enum OratorError: LocalizedError {
     case modelNotFound
     case voicesNotFound
     case voiceNotFound(String)
+    case noTextToExport
 
     var errorDescription: String? {
         switch self {
         case .modelNotFound: return "Kokoro model not found in app bundle"
         case .voicesNotFound: return "Voice embeddings not found in app bundle"
         case .voiceNotFound(let name): return "Voice \"\(name)\" not found"
+        case .noTextToExport: return "No text to export"
         }
     }
 }
@@ -88,6 +90,80 @@ final class OratorEngine: @unchecked Sendable {
         synthQueue.async { [self] in
             guard let voice = voices[currentVoice + ".npy"] ?? voices.values.first.map({ $0 }) else { return }
             _ = try? tts.generateAudio(voice: voice, language: .enUS, text: "Hi.", speed: 1.0)
+        }
+    }
+
+    /// Resolve a voice name to its embedding, tolerating suffix-spelling variants.
+    private func embedding(for voiceName: String) -> MLXArray? {
+        voices[voiceName + ".npy"] ?? voices[voiceName] ?? voices[voiceName + ".npy.npy"]
+    }
+
+    // MARK: - Export (offline synthesis to file)
+
+    /// Synthesize the full text to an audio file (AAC `.m4a`) offline.
+    ///
+    /// This is **additive and isolated** from the live playback path: it runs on
+    /// the shared `synthQueue` so it never invokes MLX concurrently with `speak`,
+    /// but it touches none of the playback state machine (`generation`, `lock`,
+    /// `scheduledBuffers`, `synthesisDone`, `speaking`, `player`, `audioEngine`).
+    /// Progress and completion are delivered on the main queue.
+    func synthesizeToFile(
+        _ text: String,
+        voiceName: String? = nil,
+        to url: URL,
+        progress: (@Sendable (Double) -> Void)? = nil,
+        completion: @escaping @Sendable (Result<URL, Error>) -> Void
+    ) {
+        let chunks = TextChunker.chunk(text)
+        let voiceKey = voiceName ?? currentVoice
+        let spd = self.speed
+
+        synthQueue.async { [self] in
+            func finish(_ result: Result<URL, Error>) {
+                DispatchQueue.main.async { completion(result) }
+            }
+            do {
+                guard !chunks.isEmpty else { throw OratorError.noTextToExport }
+                guard let voice = embedding(for: voiceKey) else {
+                    throw OratorError.voiceNotFound(voiceKey)
+                }
+                let language: Language = voiceKey.hasPrefix("b") ? .enGB : .enUS
+
+                let settings: [String: Any] = [
+                    AVFormatIDKey: kAudioFormatMPEG4AAC,
+                    AVSampleRateKey: Double(KokoroTTS.Constants.samplingRate),
+                    AVNumberOfChannelsKey: 1,
+                    AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+                ]
+                let file = try AVAudioFile(forWriting: url, settings: settings)
+                let writeFormat = file.processingFormat
+
+                let total = chunks.count
+                for (index, chunk) in chunks.enumerated() {
+                    let (samples, _) = try tts.generateAudio(
+                        voice: voice, language: language, text: chunk, speed: spd
+                    )
+                    if !samples.isEmpty,
+                       let buffer = AVAudioPCMBuffer(
+                           pcmFormat: writeFormat,
+                           frameCapacity: AVAudioFrameCount(samples.count)
+                       ) {
+                        buffer.frameLength = buffer.frameCapacity
+                        samples.withUnsafeBufferPointer { src in
+                            UnsafeMutableRawPointer(buffer.floatChannelData![0]).copyMemory(
+                                from: UnsafeRawPointer(src.baseAddress!),
+                                byteCount: src.count * MemoryLayout<Float>.stride
+                            )
+                        }
+                        try file.write(from: buffer)
+                    }
+                    let fraction = Double(index + 1) / Double(total)
+                    if let progress { DispatchQueue.main.async { progress(fraction) } }
+                }
+                finish(.success(url))
+            } catch {
+                finish(.failure(error))
+            }
         }
     }
 

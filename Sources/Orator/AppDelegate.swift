@@ -1,5 +1,6 @@
 import Cocoa
 import ServiceManagement
+import UniformTypeIdentifiers
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -260,6 +261,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             speakClipboard.target = self
             menu.addItem(speakClipboard)
 
+            let exportSelection = NSMenuItem(
+                title: "Export Selection to Audio…",
+                action: #selector(exportSelectionToAudio),
+                keyEquivalent: ""
+            )
+            exportSelection.target = self
+            menu.addItem(exportSelection)
+
+            let exportClipboard = NSMenuItem(
+                title: "Export Clipboard to Audio…",
+                action: #selector(exportClipboardToAudio),
+                keyEquivalent: ""
+            )
+            exportClipboard.target = self
+            menu.addItem(exportClipboard)
+
             let speakTest = NSMenuItem(title: "Speak Test Sentence", action: #selector(speakTestSentence), keyEquivalent: "")
             speakTest.target = self
             menu.addItem(speakTest)
@@ -335,6 +352,91 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .userInitiated).async {
             do { try engine.speak(text) }
             catch { NSLog("Orator: speak failed: %@", error.localizedDescription) }
+        }
+    }
+
+    @objc private func exportSelectionToAudio() {
+        captureSelectedText { [weak self] text in
+            self?.exportToAudio(text)
+        }
+    }
+
+    @objc private func exportClipboardToAudio() {
+        exportToAudio(NSPasteboard.general.string(forType: .string))
+    }
+
+    private func exportToAudio(_ text: String?) {
+        let trimmedText = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmedText.isEmpty else {
+            showNotification("Nothing to export", body: "Select or copy some text first.")
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.mpeg4Audio]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = "\(defaultExportFilename(for: trimmedText)).m4a"
+
+        let fileManager = FileManager.default
+        panel.directoryURL = fileManager.urls(for: .musicDirectory, in: .userDomainMask).first
+            ?? fileManager.urls(for: .downloadsDirectory, in: .userDomainMask).first
+
+        panel.begin { [weak self] response in
+            guard response == .OK,
+                  let self,
+                  let engine = self.engine,
+                  let url = panel.url else { return }
+
+            self.statusItem.button?.toolTip = "Exporting… 0%"
+            engine.synthesizeToFile(
+                trimmedText,
+                to: url,
+                progress: { [weak self] fraction in
+                    MainActor.assumeIsolated {
+                        let percent = Int((fraction * 100).rounded())
+                        self?.statusItem.button?.toolTip = "Exporting… \(percent)%"
+                    }
+                },
+                completion: { [weak self] result in
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        self.statusItem.button?.toolTip = nil
+
+                        switch result {
+                        case .success(let url):
+                            NSWorkspace.shared.activateFileViewerSelecting([url])
+                        case .failure(let error):
+                            self.showNotification("Export failed", body: error.localizedDescription)
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    private func defaultExportFilename(for text: String) -> String {
+        let prefix = String(text.prefix(40))
+        let unsafeCharacters = CharacterSet(charactersIn: "/:\\?%*|\"<>")
+            .union(.controlCharacters)
+        let sanitized = prefix.unicodeScalars.map { scalar in
+            unsafeCharacters.contains(scalar) ? " " : String(scalar)
+        }.joined()
+        let collapsed = sanitized.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        let filename = collapsed.trimmingCharacters(in: CharacterSet(charactersIn: ". "))
+        return filename.isEmpty ? "Orator Audio" : filename
+    }
+
+    private func showNotification(_ title: String, body: String) {
+        let escapedTitle = title
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedBody = body
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let script = "display notification \"\(escapedBody)\" with title \"\(escapedTitle)\""
+        if let appleScript = NSAppleScript(source: script) {
+            appleScript.executeAndReturnError(nil)
         }
     }
 
