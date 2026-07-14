@@ -26,10 +26,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let defaults = UserDefaults.standard
     private let appProfiles = AppVoiceProfiles()
+    private let history = ReadingHistory()
+    private var rememberHistory: Bool = {
+        let defaults = UserDefaults.standard
+        return defaults.object(forKey: "rememberHistory") == nil
+            ? true
+            : defaults.bool(forKey: "rememberHistory")
+    }()
     private enum Pref {
         static let voice = "voice"
         static let speed = "speed"
         static let continuousReading = "continuousReading"
+        static let rememberHistory = "rememberHistory"
     }
     private static let speedOptions: [Float] = [0.8, 0.9, 1.0, 1.1, 1.25, 1.5]
 
@@ -178,11 +186,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 engine.speed = globalSpeed
             }
 
+            self.recordHistory(text)
             DispatchQueue.global(qos: .userInitiated).async {
                 do { try engine.speak(text) }
                 catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
             }
         }
+    }
+
+    private func recordHistory(_ text: String) {
+        guard rememberHistory else { return }
+        history.add(text)
+        rebuildMenu()
     }
 
     /// Simulate Cmd+C, read the pasteboard, then restore the user's clipboard.
@@ -459,6 +474,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(.separator())
         }
 
+        let historyRoot = NSMenuItem(title: "History", action: nil, keyEquivalent: "")
+        let historyMenu = NSMenu()
+        let historyEntries = history.entries
+        if historyEntries.isEmpty {
+            let emptyHistory = NSMenuItem(title: "No recent reads", action: nil, keyEquivalent: "")
+            emptyHistory.isEnabled = false
+            historyMenu.addItem(emptyHistory)
+        } else {
+            for entry in historyEntries.prefix(20) {
+                let item = NSMenuItem(
+                    title: entry.title,
+                    action: #selector(readHistoryEntry(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = entry.text
+                item.isEnabled = engine != nil
+                historyMenu.addItem(item)
+            }
+        }
+        historyMenu.addItem(.separator())
+
+        let rememberHistoryItem = NSMenuItem(
+            title: "Remember Reading History",
+            action: #selector(toggleRememberHistory),
+            keyEquivalent: ""
+        )
+        rememberHistoryItem.target = self
+        rememberHistoryItem.state = rememberHistory ? .on : .off
+        historyMenu.addItem(rememberHistoryItem)
+
+        let clearHistoryItem = NSMenuItem(
+            title: "Clear History",
+            action: #selector(clearHistory),
+            keyEquivalent: ""
+        )
+        clearHistoryItem.target = self
+        historyMenu.addItem(clearHistoryItem)
+
+        historyRoot.submenu = historyMenu
+        menu.addItem(historyRoot)
+        menu.addItem(.separator())
+
         // Login item toggle
         let login = NSMenuItem(title: "Start at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
         login.target = self
@@ -600,6 +658,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
+    @objc private func readHistoryEntry(_ sender: NSMenuItem) {
+        guard let engine, let text = sender.representedObject as? String else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            do { try engine.speak(text) }
+            catch { oratorLog("history speak FAILED: \(error.localizedDescription)") }
+        }
+    }
+
+    @objc private func toggleRememberHistory() {
+        rememberHistory.toggle()
+        defaults.set(rememberHistory, forKey: Pref.rememberHistory)
+        rebuildMenu()
+    }
+
+    @objc private func clearHistory() {
+        history.clear()
+        rebuildMenu()
+    }
+
     private func addToReadingQueue(_ text: String?) {
         guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             showNotification("Nothing to queue", body: "Select or copy some text first.")
@@ -653,6 +730,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func speakClipboardText() {
         guard let engine = engine,
               let text = NSPasteboard.general.string(forType: .string) else { return }
+        recordHistory(text)
         DispatchQueue.global(qos: .userInitiated).async {
             do { try engine.speak(text) }
             catch { NSLog("Orator: speak failed: %@", error.localizedDescription) }
@@ -674,6 +752,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let text = try FileTextExtractor.extractText(from: url)
                     DispatchQueue.main.async {
                         guard let engine = self.engine else { return }
+                        self.recordHistory(text)
                         DispatchQueue.global(qos: .userInitiated).async {
                             do { try engine.speak(text) }
                             catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
