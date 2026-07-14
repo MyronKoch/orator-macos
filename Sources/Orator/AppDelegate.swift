@@ -22,12 +22,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastReadApp: (bundleID: String, name: String)?
     private var readingQueue: [String] = []
     private var queuePlaybackActive = false
+    private var continuousReading: Bool = true
 
     private let defaults = UserDefaults.standard
     private let appProfiles = AppVoiceProfiles()
     private enum Pref {
         static let voice = "voice"
         static let speed = "speed"
+        static let continuousReading = "continuousReading"
     }
     private static let speedOptions: [Float] = [0.8, 0.9, 1.0, 1.1, 1.25, 1.5]
 
@@ -59,7 +61,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.queuePlaybackActive else { return }
-                self.playNextInQueue()
+                if self.continuousReading {
+                    self.playNextInQueue()
+                } else {
+                    self.queuePlaybackActive = false
+                    self.rebuildMenu()
+                }
             }
         }
     }
@@ -88,6 +95,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     engine.currentVoice = self.defaults.string(forKey: Pref.voice) ?? "af_heart"
                     let savedSpeed = self.defaults.float(forKey: Pref.speed)
                     engine.speed = savedSpeed > 0 ? savedSpeed : 1.0
+                    self.continuousReading = self.defaults.object(forKey: Pref.continuousReading) == nil
+                        ? true
+                        : self.defaults.bool(forKey: Pref.continuousReading)
                     self.rebuildMenu()
                     NSLog("Orator: engine ready (%d voices)", engine.voiceNames.count)
                 }
@@ -392,6 +402,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             queueRoot.submenu = queueMenu
             menu.addItem(queueRoot)
+
+            let continuousReadingItem = NSMenuItem(
+                title: "Continuous Reading",
+                action: #selector(toggleContinuousReading),
+                keyEquivalent: ""
+            )
+            continuousReadingItem.target = self
+            continuousReadingItem.state = continuousReading ? .on : .off
+            menu.addItem(continuousReadingItem)
             menu.addItem(.separator())
 
             let speakClipboard = NSMenuItem(title: "Speak Clipboard", action: #selector(speakClipboardText), keyEquivalent: "")
@@ -573,6 +592,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func addClipboardToQueue() {
         addToReadingQueue(NSPasteboard.general.string(forType: .string))
+    }
+
+    @objc private func toggleContinuousReading() {
+        continuousReading.toggle()
+        defaults.set(continuousReading, forKey: Pref.continuousReading)
+        rebuildMenu()
     }
 
     private func addToReadingQueue(_ text: String?) {
