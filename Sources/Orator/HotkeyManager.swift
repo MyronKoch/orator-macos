@@ -31,10 +31,13 @@ func oratorLog(_ message: String) {
 /// actually deliver events on this machine.
 final class HotkeyManager: @unchecked Sendable {
 
-    static let keyCode: UInt16 = 39      // ANSI apostrophe
-    static let altKeyCode: UInt16 = 36   // Return — accepted as an alternate chord
+    private var keyCode: UInt16 = 39                    // default: apostrophe
+    private var altKeyCode: UInt16? = 36                // default: Return (secondary)
+    private var modifiers: NSEvent.ModifierFlags = [.option]
 
     private var carbonHotKeyRef: EventHotKeyRef?
+    private var carbonInstallStatus: OSStatus?
+    private var didInstallCarbonHandler = false
     private var nsEventMonitor: Any?
     private var eventTap: CFMachPort?
     private var tapRunLoopSource: CFRunLoopSource?
@@ -51,9 +54,18 @@ final class HotkeyManager: @unchecked Sendable {
     func installAll() {
         requestInputMonitoringIfNeeded()
         installCarbon()
+        registerCarbonHotKey()
         installNSEventMonitor()
         installEventTap()
         censusEventTaps()
+    }
+
+    func reconfigure(keyCode: UInt16, modifiers: NSEvent.ModifierFlags) {
+        self.keyCode = keyCode
+        self.altKeyCode = nil
+        self.modifiers = modifiers
+        registerCarbonHotKey()
+        log("hotkey reconfigured: keyCode=\(keyCode) modifiers=\(modifiers.rawValue)")
     }
 
     /// Log every process holding a system event tap - identifies key-swallowers.
@@ -96,6 +108,26 @@ final class HotkeyManager: @unchecked Sendable {
         oratorLog(message)
     }
 
+    private var carbonModifiers: UInt32 {
+        var result: UInt32 = 0
+        if modifiers.contains(.option) { result |= UInt32(optionKey) }
+        if modifiers.contains(.command) { result |= UInt32(cmdKey) }
+        if modifiers.contains(.control) { result |= UInt32(controlKey) }
+        if modifiers.contains(.shift) { result |= UInt32(shiftKey) }
+        return result
+    }
+
+    private func matchesCGEventModifiers(_ flags: CGEventFlags) -> Bool {
+        (flags.contains(.maskAlternate) == modifiers.contains(.option))
+            && (flags.contains(.maskCommand) == modifiers.contains(.command))
+            && (flags.contains(.maskControl) == modifiers.contains(.control))
+            && (flags.contains(.maskShift) == modifiers.contains(.shift))
+    }
+
+    private func matchesNSEventModifiers(_ flags: NSEvent.ModifierFlags) -> Bool {
+        flags.intersection([.option, .command, .control, .shift]) == modifiers
+    }
+
     // MARK: - Permissions
 
     private func requestInputMonitoringIfNeeded() {
@@ -110,6 +142,9 @@ final class HotkeyManager: @unchecked Sendable {
     // MARK: - Path 1: Carbon
 
     private func installCarbon() {
+        guard !didInstallCarbonHandler else { return }
+        didInstallCarbonHandler = true
+
         var eventType = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
             eventKind: UInt32(kEventHotKeyPressed)
@@ -127,10 +162,21 @@ final class HotkeyManager: @unchecked Sendable {
             Unmanaged.passUnretained(self).toOpaque(),
             nil
         )
+        carbonInstallStatus = installStatus
+    }
+
+    private func registerCarbonHotKey() {
+        if let carbonHotKeyRef {
+            UnregisterEventHotKey(carbonHotKeyRef)
+            self.carbonHotKeyRef = nil
+        }
+
+        let target = GetEventDispatcherTarget()
         let hotKeyID = EventHotKeyID(signature: OSType(0x4F524154) /* 'ORAT' */, id: 1)
         let registerStatus = RegisterEventHotKey(
-            UInt32(Self.keyCode), UInt32(optionKey), hotKeyID, target, 0, &carbonHotKeyRef
+            UInt32(keyCode), carbonModifiers, hotKeyID, target, 0, &carbonHotKeyRef
         )
+        let installStatus = carbonInstallStatus ?? OSStatus(eventNotHandledErr)
         log("carbon install=\(installStatus) register=\(registerStatus)")
     }
 
@@ -138,10 +184,11 @@ final class HotkeyManager: @unchecked Sendable {
 
     private func installNSEventMonitor() {
         nsEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard event.keyCode == Self.keyCode,
-                  event.modifierFlags.intersection([.option, .command, .control, .shift]) == .option
-            else { return }
-            self?.fire(from: "nsevent")
+            guard let self else { return }
+            let matchesKey = event.keyCode == self.keyCode
+                || (self.altKeyCode.map { event.keyCode == $0 } ?? false)
+            guard matchesKey, self.matchesNSEventModifiers(event.modifierFlags) else { return }
+            self.fire(from: "nsevent")
         }
         log("nsevent monitor installed=\(nsEventMonitor != nil)")
     }
@@ -155,9 +202,9 @@ final class HotkeyManager: @unchecked Sendable {
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(userInfo).takeUnretainedValue()
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                 let flags = event.flags
-                if (keyCode == Int64(HotkeyManager.keyCode) || keyCode == Int64(HotkeyManager.altKeyCode)),
-                   flags.contains(.maskAlternate),
-                   !flags.contains(.maskCommand), !flags.contains(.maskControl), !flags.contains(.maskShift) {
+                let matchesKey = keyCode == Int64(manager.keyCode)
+                    || (manager.altKeyCode.map { keyCode == Int64($0) } ?? false)
+                if matchesKey, manager.matchesCGEventModifiers(flags) {
                     manager.fire(from: "eventtap")
                 }
             }
