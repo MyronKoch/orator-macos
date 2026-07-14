@@ -6,6 +6,8 @@ import UniformTypeIdentifiers
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
+    static weak var shared: AppDelegate?
+
     // MARK: - State
 
     private var statusItem: NSStatusItem!
@@ -48,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Launch
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppDelegate.shared = self
         setupStatusItem()
         loadEngineAsync()
 
@@ -81,6 +84,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         cleanupPreviewTempFile()
+    }
+
+    // MARK: - App Intents
+
+    func speakText(_ text: String) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let engine else { return }
+
+        recordHistory(text)
+        DispatchQueue.global(qos: .userInitiated).async {
+            do { try engine.speak(text) }
+            catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
+        }
+    }
+
+    func speakClipboard() {
+        guard let text = NSPasteboard.general.string(forType: .string) else { return }
+        speakText(text)
     }
 
     // MARK: - Engine
@@ -728,13 +749,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func speakClipboardText() {
-        guard let engine = engine,
-              let text = NSPasteboard.general.string(forType: .string) else { return }
-        recordHistory(text)
-        DispatchQueue.global(qos: .userInitiated).async {
-            do { try engine.speak(text) }
-            catch { NSLog("Orator: speak failed: %@", error.localizedDescription) }
-        }
+        speakClipboard()
     }
 
     @objc private func readFile() {
@@ -887,7 +902,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func stopSpeaking() {
+    @objc func stopSpeaking() {
         queuePlaybackActive = false
         engine?.stop()
         rebuildMenu()
