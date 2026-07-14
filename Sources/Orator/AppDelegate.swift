@@ -20,6 +20,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var previewAudioPlayer: AVAudioPlayer?
     private var isPreviewRenderInFlight = false
     private var lastReadApp: (bundleID: String, name: String)?
+    private var readingQueue: [String] = []
+    private var queuePlaybackActive = false
 
     private let defaults = UserDefaults.standard
     private let appProfiles = AppVoiceProfiles()
@@ -52,6 +54,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(
             forName: .oratorSpeechFinished, object: nil, queue: .main
         ) { [weak self] _ in Task { @MainActor in self?.updateIcon(speaking: false) } }
+        NotificationCenter.default.addObserver(
+            forName: .oratorSpeechFinished, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.queuePlaybackActive else { return }
+                self.playNextInQueue()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -132,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if engine.isSpeaking {
             oratorLog("toggle: was speaking → stop")
+            queuePlaybackActive = false
             engine.stop()
             return
         }
@@ -318,6 +329,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(pronunciations)
             menu.addItem(.separator())
 
+            let addSelectionToQueue = NSMenuItem(
+                title: "Add Selection to Queue",
+                action: #selector(addSelectionToQueue),
+                keyEquivalent: ""
+            )
+            addSelectionToQueue.target = self
+            menu.addItem(addSelectionToQueue)
+
+            let addClipboardToQueue = NSMenuItem(
+                title: "Add Clipboard to Queue",
+                action: #selector(addClipboardToQueue),
+                keyEquivalent: ""
+            )
+            addClipboardToQueue.target = self
+            menu.addItem(addClipboardToQueue)
+
+            let queueRoot = NSMenuItem(title: "Queue", action: nil, keyEquivalent: "")
+            let queueMenu = NSMenu()
+            let queueCountTitle = readingQueue.isEmpty
+                ? "Empty"
+                : "\(readingQueue.count) \(readingQueue.count == 1 ? "item" : "items")"
+            let queueCount = NSMenuItem(title: queueCountTitle, action: nil, keyEquivalent: "")
+            queueCount.isEnabled = false
+            queueMenu.addItem(queueCount)
+
+            for text in readingQueue {
+                let item = NSMenuItem(title: queueItemTitle(for: text), action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                queueMenu.addItem(item)
+            }
+
+            if queuePlaybackActive || !readingQueue.isEmpty {
+                queueMenu.addItem(.separator())
+            }
+            if !readingQueue.isEmpty && !queuePlaybackActive {
+                let playQueue = NSMenuItem(
+                    title: "Play Queue",
+                    action: #selector(startQueuePlayback),
+                    keyEquivalent: ""
+                )
+                playQueue.target = self
+                queueMenu.addItem(playQueue)
+            }
+            if queuePlaybackActive {
+                let stopQueue = NSMenuItem(
+                    title: "Stop Queue",
+                    action: #selector(stopQueuePlayback),
+                    keyEquivalent: ""
+                )
+                stopQueue.target = self
+                queueMenu.addItem(stopQueue)
+            }
+            if !readingQueue.isEmpty {
+                let clearQueue = NSMenuItem(
+                    title: "Clear Queue",
+                    action: #selector(clearReadingQueue),
+                    keyEquivalent: ""
+                )
+                clearQueue.target = self
+                queueMenu.addItem(clearQueue)
+            }
+            queueRoot.submenu = queueMenu
+            menu.addItem(queueRoot)
+            menu.addItem(.separator())
+
             let speakClipboard = NSMenuItem(title: "Speak Clipboard", action: #selector(speakClipboardText), keyEquivalent: "")
             speakClipboard.target = self
             menu.addItem(speakClipboard)
@@ -386,10 +462,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return "\(parts[1].capitalized)  (\(accent) \(gender))"
     }
 
+    private func queueItemTitle(for text: String) -> String {
+        let singleLine = text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        let prefix = String(singleLine.prefix(40))
+        return singleLine.count > 40 ? "\(prefix)…" : prefix
+    }
+
     // MARK: - Menu actions
 
     @objc private func selectVoice(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String, let engine = engine else { return }
+        queuePlaybackActive = false
         engine.stop()
         engine.currentVoice = name
         defaults.set(name, forKey: Pref.voice)
@@ -479,6 +562,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             NSLog("Orator: login item toggle failed: %@", error.localizedDescription)
         }
+        rebuildMenu()
+    }
+
+    @objc private func addSelectionToQueue() {
+        captureSelectedText { [weak self] text in
+            self?.addToReadingQueue(text)
+        }
+    }
+
+    @objc private func addClipboardToQueue() {
+        addToReadingQueue(NSPasteboard.general.string(forType: .string))
+    }
+
+    private func addToReadingQueue(_ text: String?) {
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            showNotification("Nothing to queue", body: "Select or copy some text first.")
+            return
+        }
+
+        readingQueue.append(text)
+        if engine?.isSpeaking == false && !queuePlaybackActive {
+            startQueuePlayback()
+        } else {
+            rebuildMenu()
+        }
+    }
+
+    @objc private func startQueuePlayback() {
+        queuePlaybackActive = true
+        playNextInQueue()
+    }
+
+    private func playNextInQueue() {
+        guard !readingQueue.isEmpty else {
+            queuePlaybackActive = false
+            rebuildMenu()
+            return
+        }
+        guard let engine else {
+            queuePlaybackActive = false
+            rebuildMenu()
+            return
+        }
+
+        let text = readingQueue.removeFirst()
+        DispatchQueue.global(qos: .userInitiated).async {
+            do { try engine.speak(text) }
+            catch { oratorLog("queue speak FAILED: \(error.localizedDescription)") }
+        }
+        rebuildMenu()
+    }
+
+    @objc private func stopQueuePlayback() {
+        queuePlaybackActive = false
+        engine?.stop()
+        rebuildMenu()
+    }
+
+    @objc private func clearReadingQueue() {
+        readingQueue.removeAll()
         rebuildMenu()
     }
 
@@ -641,7 +784,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func stopSpeaking() {
+        queuePlaybackActive = false
         engine?.stop()
+        rebuildMenu()
     }
 
     @objc private func openOnboarding() {
@@ -650,6 +795,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func quit() {
+        queuePlaybackActive = false
         engine?.stop()
         cleanupPreviewTempFile()
         NSApp.terminate(nil)
