@@ -110,13 +110,14 @@ final class OratorEngine: @unchecked Sendable {
     func synthesizeToFile(
         _ text: String,
         voiceName: String? = nil,
+        speed: Float? = nil,
         to url: URL,
         progress: (@Sendable (Double) -> Void)? = nil,
         completion: @escaping @Sendable (Result<URL, Error>) -> Void
     ) {
         let chunks = TextChunker.chunk(text)
         let voiceKey = voiceName ?? currentVoice
-        let spd = self.speed
+        let spd = speed ?? self.speed
 
         synthQueue.async { [self] in
             func finish(_ result: Result<URL, Error>) {

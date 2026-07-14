@@ -1,4 +1,5 @@
 import Cocoa
+import AVFoundation
 import ServiceManagement
 import UniformTypeIdentifiers
 
@@ -16,6 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingStatusLabel: NSTextField?
     private var pronunciationsEditor: PronunciationsEditor?
     private var appVoiceProfilesEditor: AppVoiceProfilesEditor?
+    private var previewAudioPlayer: AVAudioPlayer?
+    private var isPreviewRenderInFlight = false
     private var lastReadApp: (bundleID: String, name: String)?
 
     private let defaults = UserDefaults.standard
@@ -411,12 +414,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appVoiceProfilesEditor = AppVoiceProfilesEditor(
                 profiles: appProfiles,
                 voiceNames: engine?.voiceNames ?? [],
-                speedOptions: Self.speedOptions
-            ) { [weak self] in
-                self?.rebuildMenu()
-            }
+                speedOptions: Self.speedOptions,
+                onPreview: { [weak self] voice, speed in
+                    self?.previewVoice(voice, speed: speed)
+                },
+                onChange: { [weak self] in
+                    self?.rebuildMenu()
+                }
+            )
         }
         appVoiceProfilesEditor?.show()
+    }
+
+    func previewVoice(_ voiceName: String, speed: Float) {
+        guard let engine, !isPreviewRenderInFlight else { return }
+
+        isPreviewRenderInFlight = true
+        let sample = "The quick brown fox jumps over the lazy dog."
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("orator-preview.m4a")
+        engine.synthesizeToFile(sample, voiceName: voiceName, speed: speed, to: url) { [weak self] result in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.isPreviewRenderInFlight = false
+
+                guard case .success(let renderedURL) = result else { return }
+                do {
+                    self.previewAudioPlayer?.stop()
+                    self.previewAudioPlayer = try AVAudioPlayer(contentsOf: renderedURL)
+                    self.previewAudioPlayer?.play()
+                } catch {
+                    oratorLog("voice preview playback FAILED: \(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     @objc private func toggleLoginItem() {
@@ -635,12 +665,14 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         static let app = NSUserInterfaceItemIdentifier("appVoiceProfileApp")
         static let voice = NSUserInterfaceItemIdentifier("appVoiceProfileVoice")
         static let speed = NSUserInterfaceItemIdentifier("appVoiceProfileSpeed")
+        static let preview = NSUserInterfaceItemIdentifier("appVoiceProfilePreview")
         static let remove = NSUserInterfaceItemIdentifier("appVoiceProfileRemove")
     }
 
     private let profiles: AppVoiceProfiles
     private let voiceNames: [String]
     private let speedOptions: [Float]
+    private let onPreview: (_ voiceName: String, _ speed: Float) -> Void
     private let onChange: @MainActor () -> Void
     private let window: NSWindow
     private let tableView = NSTableView()
@@ -650,11 +682,13 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         profiles: AppVoiceProfiles,
         voiceNames: [String],
         speedOptions: [Float],
+        onPreview: @escaping (_ voiceName: String, _ speed: Float) -> Void,
         onChange: @escaping @MainActor () -> Void
     ) {
         self.profiles = profiles
         self.voiceNames = voiceNames
         self.speedOptions = speedOptions
+        self.onPreview = onPreview
         self.onChange = onChange
         rows = profiles.all
         window = NSWindow(
@@ -714,6 +748,11 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         speedColumn.width = 80
         speedColumn.minWidth = 60
 
+        let previewColumn = NSTableColumn(identifier: Column.preview)
+        previewColumn.title = "Preview"
+        previewColumn.width = 90
+        previewColumn.minWidth = 80
+
         let removeColumn = NSTableColumn(identifier: Column.remove)
         removeColumn.title = "Remove"
         removeColumn.width = 90
@@ -722,6 +761,7 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         tableView.addTableColumn(appColumn)
         tableView.addTableColumn(voiceColumn)
         tableView.addTableColumn(speedColumn)
+        tableView.addTableColumn(previewColumn)
         tableView.addTableColumn(removeColumn)
         tableView.dataSource = self
         tableView.delegate = self
@@ -758,6 +798,14 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
 
         if identifier == Column.remove {
             let button = NSButton(title: "Remove", target: self, action: #selector(removeProfile(_:)))
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.tag = row
+            return button
+        }
+
+        if identifier == Column.preview {
+            let button = NSButton(title: "▶︎ Preview", target: self, action: #selector(previewProfile(_:)))
             button.bezelStyle = .rounded
             button.controlSize = .small
             button.tag = row
@@ -883,6 +931,12 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         )
         reload()
         onChange()
+    }
+
+    @objc private func previewProfile(_ sender: NSButton) {
+        guard rows.indices.contains(sender.tag) else { return }
+        let profile = rows[sender.tag].profile
+        onPreview(profile.voice, profile.speed)
     }
 
     @objc private func removeProfile(_ sender: NSButton) {
