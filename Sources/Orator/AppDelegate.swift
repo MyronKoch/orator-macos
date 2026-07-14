@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var trustPollTimer: Timer?
     private var onboardingWindow: NSWindow?
     private var onboardingStatusLabel: NSTextField?
+    private var pronunciationsEditor: PronunciationsEditor?
 
     private let defaults = UserDefaults.standard
     private enum Pref {
@@ -245,6 +246,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             speedRoot.submenu = speedMenu
             menu.addItem(speedRoot)
+
+            let pronunciations = NSMenuItem(
+                title: "Pronunciations…",
+                action: #selector(openPronunciations),
+                keyEquivalent: ""
+            )
+            pronunciations.target = self
+            menu.addItem(pronunciations)
             menu.addItem(.separator())
 
             let speakClipboard = NSMenuItem(title: "Speak Clipboard", action: #selector(speakClipboardText), keyEquivalent: "")
@@ -298,6 +307,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engine.speed = value
         defaults.set(value, forKey: Pref.speed)
         rebuildMenu()
+    }
+
+    @objc private func openPronunciations() {
+        if pronunciationsEditor == nil {
+            pronunciationsEditor = PronunciationsEditor(pronunciations: .shared)
+        }
+        pronunciationsEditor?.show()
     }
 
     @objc private func toggleLoginItem() {
@@ -419,5 +435,206 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openAccessibilitySettings() {
         let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
         NSWorkspace.shared.open(url)
+    }
+}
+
+// MARK: - Pronunciations window
+
+@MainActor
+private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+
+    private enum Column {
+        static let word = NSUserInterfaceItemIdentifier("pronunciationWord")
+        static let respelling = NSUserInterfaceItemIdentifier("pronunciationRespelling")
+    }
+
+    private let pronunciations: Pronunciations
+    private let window: NSWindow
+    private let tableView = NSTableView()
+    private var removeButton: NSButton!
+    private var rows: [(key: String, value: String)]
+
+    init(pronunciations: Pronunciations) {
+        self.pronunciations = pronunciations
+        rows = pronunciations.entries
+        window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 540, height: 410),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        super.init()
+        configureWindow()
+    }
+
+    func show() {
+        rows = pronunciations.entries
+        tableView.reloadData()
+        updateRemoveButton()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func configureWindow() {
+        window.title = "Pronunciations"
+        window.center()
+        window.isReleasedWhenClosed = false
+
+        let content = NSStackView()
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 12
+        content.edgeInsets = NSEdgeInsets(top: 22, left: 24, bottom: 22, right: 24)
+
+        let heading = NSTextField(labelWithString: "Pronunciation Dictionary")
+        heading.font = .systemFont(ofSize: 20, weight: .semibold)
+
+        let body = NSTextField(wrappingLabelWithString:
+            "Add words Orator should say differently. For example, enter “nginx” and “engine ex”."
+        )
+        body.font = .systemFont(ofSize: 13)
+        body.textColor = .secondaryLabelColor
+        body.preferredMaxLayoutWidth = 492
+
+        let wordColumn = NSTableColumn(identifier: Column.word)
+        wordColumn.title = "Word"
+        wordColumn.width = 236
+        wordColumn.minWidth = 140
+
+        let respellingColumn = NSTableColumn(identifier: Column.respelling)
+        respellingColumn.title = "Say it like"
+        respellingColumn.width = 256
+        respellingColumn.minWidth = 160
+
+        tableView.addTableColumn(wordColumn)
+        tableView.addTableColumn(respellingColumn)
+        tableView.dataSource = self
+        tableView.delegate = self
+        tableView.headerView = NSTableHeaderView()
+        tableView.rowHeight = 26
+        tableView.usesAlternatingRowBackgroundColors = true
+        tableView.allowsMultipleSelection = false
+        tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+
+        let scrollView = NSScrollView()
+        scrollView.documentView = tableView
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .bezelBorder
+        scrollView.widthAnchor.constraint(equalToConstant: 492).isActive = true
+        scrollView.heightAnchor.constraint(equalToConstant: 238).isActive = true
+
+        let addButton = NSButton(title: "Add", target: self, action: #selector(addEntry))
+        addButton.bezelStyle = .rounded
+        removeButton = NSButton(title: "Remove", target: self, action: #selector(removeEntry))
+        removeButton.bezelStyle = .rounded
+
+        let buttons = NSStackView(views: [addButton, removeButton])
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+
+        content.addArrangedSubview(heading)
+        content.addArrangedSubview(body)
+        content.addArrangedSubview(scrollView)
+        content.addArrangedSubview(buttons)
+
+        window.contentView = content
+        updateRemoveButton()
+    }
+
+    @objc private func addEntry() {
+        rows.append((key: "", value: ""))
+        tableView.reloadData()
+
+        let row = rows.count - 1
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        tableView.scrollRowToVisible(row)
+        tableView.editColumn(0, row: row, with: nil, select: true)
+    }
+
+    @objc private func removeEntry() {
+        let row = tableView.selectedRow
+        guard rows.indices.contains(row) else { return }
+
+        let key = rows[row].key
+        if !key.isEmpty {
+            pronunciations.remove(key: key)
+        }
+        rows.remove(at: row)
+        tableView.reloadData()
+
+        if !rows.isEmpty {
+            let nextRow = min(row, rows.count - 1)
+            tableView.selectRowIndexes(IndexSet(integer: nextRow), byExtendingSelection: false)
+        }
+        updateRemoveButton()
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        rows.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard rows.indices.contains(row), let identifier = tableColumn?.identifier else { return nil }
+
+        let field: NSTextField
+        if let reused = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTextField {
+            field = reused
+        } else {
+            field = NSTextField()
+            field.identifier = identifier
+            field.isBordered = false
+            field.drawsBackground = false
+            field.focusRingType = .none
+            field.delegate = self
+            field.cell?.isScrollable = true
+            field.cell?.wraps = false
+        }
+
+        if identifier == Column.word {
+            field.stringValue = rows[row].key
+            field.placeholderString = "e.g. nginx"
+        } else {
+            field.stringValue = rows[row].value
+            field.placeholderString = "e.g. engine ex"
+        }
+        return field
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateRemoveButton()
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField else { return }
+        let row = tableView.row(for: field)
+        let column = tableView.column(for: field)
+        guard rows.indices.contains(row), tableView.tableColumns.indices.contains(column) else { return }
+
+        let oldKey = rows[row].key
+        let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        field.stringValue = value
+
+        if tableView.tableColumns[column].identifier == Column.word {
+            rows[row].key = value
+        } else {
+            rows[row].value = value
+        }
+
+        let newKey = rows[row].key
+        if oldKey != newKey, !oldKey.isEmpty {
+            pronunciations.remove(key: oldKey)
+        }
+
+        if newKey.isEmpty || rows[row].value.isEmpty {
+            if oldKey == newKey, !oldKey.isEmpty {
+                pronunciations.remove(key: oldKey)
+            }
+        } else {
+            pronunciations.add(key: newKey, value: rows[row].value)
+        }
+    }
+
+    private func updateRemoveButton() {
+        removeButton?.isEnabled = tableView.selectedRow >= 0
     }
 }
