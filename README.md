@@ -25,9 +25,9 @@ macOS's built-in "Speak Selection" is functional but robotic. Orator gives you 2
 
 ## How it works
 
-1. Highlight text in **any** app - Safari, Mail, Notes, PDFs, anywhere
-2. Press **Option + '** (or Option + Return)
-3. Orator reads it aloud - press the hotkey again to stop
+### 1. Highlight text in **any** app - Safari, Mail, Notes, PDFs, anywhere
+### 2. Press **Option + '** (or Option + Return)
+### 3. Orator reads it aloud - press the hotkey again to stop
 
 Long articles start speaking in about a second: text is split at sentence boundaries and synthesized in a pipeline while earlier chunks play.
 
