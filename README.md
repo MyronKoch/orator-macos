@@ -1,6 +1,7 @@
 <img width="1344" height="768" alt="bust-v1-transparent" src="https://github.com/user-attachments/assets/f13ff9e7-bcb6-4a0a-8331-423aa1a69ba4" />
 
-[Click here to download the installer DMG - Orator for Mac](https://github.com/MyronKoch/orator-macos/releases/download/v1.0.0/Orator-1.0.0.dmg)
+# [>> Click here to download the installer DMG - Orator for Mac](https://github.com/MyronKoch/orator-macos/releases/download/v1.0.0/Orator-1.1.0.dmg)
+
 
 # Orator
 
