@@ -32,7 +32,7 @@ func oratorLog(_ message: String) {
 final class HotkeyManager: @unchecked Sendable {
 
     private var keyCode: UInt16 = 39                    // default: apostrophe
-    private var altKeyCode: UInt16? = 36                // default: Return (secondary)
+    private var altKeyCode: UInt16? = nil               // no secondary chord; custom combos are set via the recorder
     private var modifiers: NSEvent.ModifierFlags = [.option]
 
     private var carbonHotKeyRef: EventHotKeyRef?
