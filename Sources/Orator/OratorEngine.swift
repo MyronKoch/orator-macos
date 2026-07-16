@@ -63,6 +63,40 @@ final class OratorEngine: @unchecked Sendable {
         return speaking
     }
 
+    // MARK: - Reader timing surface (additive)
+    //
+    // Everything in this section observes playback or wraps the player node.
+    // None of it participates in the playback state machine (`generation`,
+    // `scheduledBuffers`, `synthesisDone`, `speaking`).
+
+    /// Optional observer for per-chunk word timing, delivered on the main
+    /// queue as each chunk of the current utterance finishes synthesis. Set
+    /// it before calling `speak`. Timings for cancelled utterances are
+    /// dropped, but consumers should still filter by `utteranceID`.
+    var onChunkTiming: (@Sendable (ChunkTiming) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _onChunkTiming }
+        set { lock.lock(); defer { lock.unlock() }; _onChunkTiming = newValue }
+    }
+    private var _onChunkTiming: (@Sendable (ChunkTiming) -> Void)?
+
+    /// Seconds of audio played so far in the current utterance. Returns nil
+    /// when the player has no live timeline - before the first play, after a
+    /// stop, and (on some systems) while paused - so consumers should hold
+    /// the last non-nil value they observed.
+    var playbackPosition: TimeInterval? {
+        guard let nodeTime = player.lastRenderTime,
+              let playerTime = player.playerTime(forNodeTime: nodeTime),
+              playerTime.sampleRate > 0 else { return nil }
+        return max(0, Double(playerTime.sampleTime) / playerTime.sampleRate)
+    }
+
+    /// Pause playback without tearing down the utterance. Synthesis of later
+    /// chunks continues in the background and keeps queueing on the player.
+    func pause() { player.pause() }
+
+    /// Resume playback after `pause()`.
+    func resume() { player.play() }
+
     // MARK: - Init
 
     init(modelPath: URL, voicesPath: URL) throws {
@@ -178,8 +212,16 @@ final class OratorEngine: @unchecked Sendable {
     // MARK: - Speak / Stop
 
     func speak(_ text: String) throws {
-        let chunks = TextChunker.chunk(text)
-        guard !chunks.isEmpty else { return }
+        try speak(chunks: TextChunker.chunk(text))
+    }
+
+    /// Speak pre-chunked text. The Reader window chunks its document once and
+    /// restarts mid-list for click-to-jump, so chunk boundaries stay stable
+    /// across seeks. Returns the utterance ID that tags this utterance's
+    /// `ChunkTiming` callbacks, or -1 if there was nothing to say.
+    @discardableResult
+    func speak(chunks: [String]) throws -> Int {
+        guard !chunks.isEmpty else { return -1 }
 
         // Voice keys may carry zero, one, or two ".npy" suffixes depending on
         // how the NPZ was authored - try all spellings.
@@ -209,13 +251,19 @@ final class OratorEngine: @unchecked Sendable {
         NotificationCenter.default.post(name: .oratorSpeechStarted, object: nil)
 
         synthQueue.async { [self] in
-            for chunk in chunks {
+            var offset: TimeInterval = 0
+            for (chunkIndex, chunk) in chunks.enumerated() {
                 if isCancelled(gen) { return }
-                guard let (samples, _) = try? tts.generateAudio(
+                guard let (samples, tokens) = try? tts.generateAudio(
                     voice: voiceEmbedding, language: language, text: chunk, speed: speed
                 ), !samples.isEmpty else { continue }
                 if isCancelled(gen) { return }
                 schedule(samples: samples, generation: gen)
+                offset += emitChunkTiming(
+                    tokens, chunkText: chunk, chunkIndex: chunkIndex,
+                    chunkCount: chunks.count, offset: offset,
+                    sampleCount: samples.count, generation: gen
+                )
             }
             lock.lock()
             if generation == gen {
@@ -228,6 +276,7 @@ final class OratorEngine: @unchecked Sendable {
                 lock.unlock()
             }
         }
+        return gen
     }
 
     func stop() {
@@ -248,6 +297,31 @@ final class OratorEngine: @unchecked Sendable {
     private func isCancelled(_ gen: Int) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return generation != gen
+    }
+
+    /// Build and deliver a `ChunkTiming` on the main queue. Returns the
+    /// chunk's audio duration so the synthesis loop can advance its running
+    /// utterance offset whether or not anyone is listening.
+    private func emitChunkTiming(
+        _ tokens: [MToken]?,
+        chunkText: String,
+        chunkIndex: Int,
+        chunkCount: Int,
+        offset: TimeInterval,
+        sampleCount: Int,
+        generation gen: Int
+    ) -> TimeInterval {
+        let duration = Double(sampleCount) / Double(KokoroTTS.Constants.samplingRate)
+        guard let callback = onChunkTiming, !isCancelled(gen) else { return duration }
+        let words = (tokens ?? []).map {
+            WordTiming(text: $0.text, whitespace: $0.whitespace, start: $0.start_ts, end: $0.end_ts)
+        }
+        let timing = ChunkTiming(
+            utteranceID: gen, chunkIndex: chunkIndex, chunkCount: chunkCount,
+            text: chunkText, offset: offset, duration: duration, words: words
+        )
+        DispatchQueue.main.async { callback(timing) }
+        return duration
     }
 
     private func schedule(samples: [Float], generation gen: Int) {
