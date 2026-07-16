@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var hotkeyRecorderMonitor: Any?
     private var pronunciationsEditor: PronunciationsEditor?
     private var appVoiceProfilesEditor: AppVoiceProfilesEditor?
+    private var readerWindowController: ReaderWindowController?
     private var previewAudioPlayer: AVAudioPlayer?
     private var isPreviewRenderInFlight = false
     private var lastReadApp: (bundleID: String, name: String)?
@@ -346,6 +347,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let speakClipboard = NSMenuItem(title: "Speak Clipboard", action: #selector(speakClipboardText), keyEquivalent: "")
             speakClipboard.target = self
             menu.addItem(speakClipboard)
+
+            let openReader = NSMenuItem(title: "Open Reader…", action: #selector(openReader), keyEquivalent: "")
+            openReader.target = self
+            menu.addItem(openReader)
 
             let stopItem = NSMenuItem(title: "Stop Speaking", action: #selector(stopSpeaking), keyEquivalent: "")
             stopItem.target = self
@@ -793,6 +798,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func speakClipboardText() {
         speakClipboard()
+    }
+
+    @objc private func openReader() {
+        captureSelectedText { [weak self] capturedText in
+            guard let self, let engine = self.engine else { return }
+            let selectedText = capturedText.flatMap { text in
+                text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
+            }
+            let text = selectedText ?? NSPasteboard.general.string(forType: .string)
+
+            if self.readerWindowController == nil {
+                self.readerWindowController = ReaderWindowController(engine: engine)
+            }
+            self.readerWindowController?.show(text: text)
+        }
     }
 
     @objc private func readFile() {
