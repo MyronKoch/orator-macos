@@ -210,6 +210,30 @@ final class ReaderSession {
                 self.transitionToIdle(clearCurrentChunk: false, resetPosition: false)
             }
         })
+
+        // Keep the Reader's play/pause state in sync when speech is paused or
+        // resumed from outside the window (global pause hotkey, menu item).
+        notificationObservers.append(center.addObserver(
+            forName: .oratorSpeechPaused,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.state == .playing else { return }
+                self.setState(.paused)
+            }
+        })
+
+        notificationObservers.append(center.addObserver(
+            forName: .oratorSpeechResumed,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.state == .paused else { return }
+                self.setState(.playing)
+            }
+        })
     }
 
     private func receive(_ timing: ChunkTiming) {

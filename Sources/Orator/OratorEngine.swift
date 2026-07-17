@@ -7,6 +7,8 @@ import MLXUtilsLibrary
 extension Notification.Name {
     static let oratorSpeechFinished = Notification.Name("oratorSpeechFinished")
     static let oratorSpeechStarted = Notification.Name("oratorSpeechStarted")
+    static let oratorSpeechPaused = Notification.Name("oratorSpeechPaused")
+    static let oratorSpeechResumed = Notification.Name("oratorSpeechResumed")
 }
 
 enum OratorError: LocalizedError {
@@ -90,12 +92,37 @@ final class OratorEngine: @unchecked Sendable {
         return max(0, Double(playerTime.sampleTime) / playerTime.sampleRate)
     }
 
+    /// True while the current utterance is paused. Cleared by speak/stop.
+    var isPaused: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _paused
+    }
+    private var _paused = false
+
     /// Pause playback without tearing down the utterance. Synthesis of later
     /// chunks continues in the background and keeps queueing on the player.
-    func pause() { player.pause() }
+    /// No-op unless an utterance is actively speaking and not already paused.
+    /// Callers are main-thread; the paused/resumed notifications post inline.
+    func pause() {
+        lock.lock()
+        let canPause = speaking && !_paused
+        if canPause { _paused = true }
+        lock.unlock()
+        guard canPause else { return }
+        player.pause()
+        NotificationCenter.default.post(name: .oratorSpeechPaused, object: nil)
+    }
 
-    /// Resume playback after `pause()`.
-    func resume() { player.play() }
+    /// Resume playback after `pause()`. No-op unless currently paused.
+    func resume() {
+        lock.lock()
+        let canResume = _paused
+        if canResume { _paused = false }
+        lock.unlock()
+        guard canResume else { return }
+        player.play()
+        NotificationCenter.default.post(name: .oratorSpeechResumed, object: nil)
+    }
 
     // MARK: - Init
 
@@ -241,6 +268,7 @@ final class OratorEngine: @unchecked Sendable {
         scheduledBuffers = 0
         synthesisDone = false
         speaking = true
+        _paused = false
         lock.unlock()
 
         player.stop()
@@ -286,6 +314,7 @@ final class OratorEngine: @unchecked Sendable {
         scheduledBuffers = 0
         let wasSpeaking = speaking
         speaking = false
+        _paused = false
         lock.unlock()
 
         player.stop()
