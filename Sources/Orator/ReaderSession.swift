@@ -2,11 +2,9 @@ import Foundation
 
 protocol ReaderSpeechEngine: AnyObject {
     var isSpeaking: Bool { get }
-    var onChunkTiming: (@Sendable (ChunkTiming) -> Void)? { get set }
+    var isPaused: Bool { get }
     var playbackPosition: TimeInterval? { get }
 
-    @discardableResult
-    func speak(chunks: [String]) throws -> Int
     func stop()
     func pause()
     func resume()
@@ -37,16 +35,14 @@ final class ReaderSession {
         let end: TimeInterval
     }
 
+    private let timeline: SpeechTimeline
     private let engine: any ReaderSpeechEngine
     private var notificationObservers: [NSObjectProtocol] = []
     private var positionTimer: Timer?
     private var alignedWords: [AlignedWord] = []
     private var timedChunks: [TimedChunk] = []
     private var activeWord: AlignedWord?
-    private var utteranceID: Int?
-    private var baseChunkIndex = 0
     private var lastKnownPosition: TimeInterval = 0
-    private var isStartingOwnUtterance = false
 
     private(set) var text = ""
     private(set) var chunks: [String] = []
@@ -59,61 +55,77 @@ final class ReaderSession {
     var onActiveWordChanged: (@MainActor (NSRange?) -> Void)?
     var onStateChanged: (@MainActor (State) -> Void)?
     var onProgressChanged: (@MainActor (_ elapsed: TimeInterval, _ chunkIndex: Int?) -> Void)?
+    var onDocumentChanged: (@MainActor () -> Void)?
 
-    init(engine: any ReaderSpeechEngine) {
+    init(timeline: SpeechTimeline, engine: any ReaderSpeechEngine) {
+        self.timeline = timeline
         self.engine = engine
+
+        timeline.onEvent = { [weak self] event in
+            self?.receive(event)
+        }
         observeSpeechNotifications()
     }
 
-    /// Replaces the document and stops any playback on the shared engine.
+    /// Loads a passive fallback document without disturbing shared playback.
     func load(rawText: String) {
-        stop()
-
+        resetPlaybackTracking(clearCurrentChunk: true, resetPosition: true)
         chunks = TextChunker.chunk(rawText)
         text = chunks.joined(separator: " ")
         chunkRanges = Self.ranges(for: chunks)
-        currentChunkIndex = nil
-        lastKnownPosition = 0
+        setState(.idle)
+        onDocumentChanged?()
         onProgressChanged?(0, nil)
+    }
+
+    /// Rebuilds this view from the always-on timeline, including timings that
+    /// arrived before the Reader window was opened.
+    func syncFromTimeline() {
+        guard let utterance = timeline.current else { return }
+
+        let documentChanged = chunks != utterance.chunks
+        resetPlaybackTracking(clearCurrentChunk: true, resetPosition: true)
+        if documentChanged {
+            setDocument(chunks: utterance.chunks)
+        }
+
+        currentChunkIndex = utterance.baseIndex
+        lastKnownPosition = engine.playbackPosition ?? 0
+
+        for globalIndex in utterance.timings.keys.sorted() {
+            guard let timing = utterance.timings[globalIndex] else { continue }
+            receive(timing, globalIndex: globalIndex, updateAfterAlignment: false)
+        }
+
+        if engine.isSpeaking {
+            setState(engine.isPaused ? .paused : .playing)
+        } else {
+            setState(.idle)
+        }
+
+        if documentChanged {
+            onDocumentChanged?()
+        }
+
+        if engine.isSpeaking {
+            updatePosition()
+            startPositionTimer()
+        } else {
+            if let chunkIndex = chunkIndex(at: lastKnownPosition) {
+                currentChunkIndex = chunkIndex
+            }
+            setActiveWord(nil)
+            onProgressChanged?(lastKnownPosition, currentChunkIndex)
+        }
     }
 
     func play(fromChunk requestedIndex: Int) {
         guard !chunks.isEmpty else { return }
         let index = min(max(requestedIndex, 0), chunks.count - 1)
 
-        engine.stop()
-        invalidatePositionTimer()
-        alignedWords.removeAll(keepingCapacity: true)
-        timedChunks.removeAll(keepingCapacity: true)
-        setActiveWord(nil)
-        utteranceID = nil
-        baseChunkIndex = index
-        currentChunkIndex = index
-        lastKnownPosition = 0
-        onProgressChanged?(0, index)
-
-        engine.onChunkTiming = { [weak self] timing in
-            MainActor.assumeIsolated {
-                guard let self, timing.utteranceID == self.utteranceID else { return }
-                self.receive(timing)
-            }
-        }
-
-        isStartingOwnUtterance = true
-        defer { isStartingOwnUtterance = false }
-
         do {
-            let id = try engine.speak(chunks: Array(chunks[index...]))
-            guard id >= 0 else {
-                transitionToIdle(clearCurrentChunk: false, resetPosition: true)
-                return
-            }
-            utteranceID = id
-            setState(.playing)
-            startPositionTimer()
+            try timeline.speak(chunks: chunks, from: index)
         } catch {
-            engine.stop()
-            engine.onChunkTiming = nil
             transitionToIdle(clearCurrentChunk: false, resetPosition: true)
             oratorLog("reader speak FAILED: \(error.localizedDescription)")
         }
@@ -140,8 +152,7 @@ final class ReaderSession {
 
     func stop() {
         engine.stop()
-        utteranceID = nil
-        transitionToIdle(clearCurrentChunk: false, resetPosition: true)
+        finishCurrentUtterance()
     }
 
     func chunkIndex(containingCharacterAt location: Int) -> Int? {
@@ -163,12 +174,17 @@ final class ReaderSession {
         return nil
     }
 
-    /// Closing the Reader intentionally stops all speech because its engine is shared.
+    /// Closing the Reader tears down view-only work without changing playback.
     func cleanup() {
-        engine.stop()
-        engine.onChunkTiming = nil
-        utteranceID = nil
-        transitionToIdle(clearCurrentChunk: false, resetPosition: true)
+        invalidatePositionTimer()
+        setActiveWord(nil)
+        setState(.idle)
+    }
+
+    private func setDocument(chunks: [String]) {
+        self.chunks = chunks
+        text = chunks.joined(separator: " ")
+        chunkRanges = Self.ranges(for: chunks)
     }
 
     private static func ranges(for chunks: [String]) -> [NSRange] {
@@ -187,30 +203,6 @@ final class ReaderSession {
 
     private func observeSpeechNotifications() {
         let center = NotificationCenter.default
-        notificationObservers.append(center.addObserver(
-            forName: .oratorSpeechStarted,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self, !self.isStartingOwnUtterance else { return }
-                self.utteranceID = nil
-                self.transitionToIdle(clearCurrentChunk: true, resetPosition: true)
-            }
-        })
-
-        notificationObservers.append(center.addObserver(
-            forName: .oratorSpeechFinished,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self, self.utteranceID != nil, !self.engine.isSpeaking else { return }
-                self.utteranceID = nil
-                self.transitionToIdle(clearCurrentChunk: false, resetPosition: false)
-            }
-        })
-
         // Keep the Reader's play/pause state in sync when speech is paused or
         // resumed from outside the window (global pause hotkey, menu item).
         notificationObservers.append(center.addObserver(
@@ -236,9 +228,39 @@ final class ReaderSession {
         })
     }
 
-    private func receive(_ timing: ChunkTiming) {
-        guard timing.utteranceID == utteranceID else { return }
-        let globalChunkIndex = baseChunkIndex + timing.chunkIndex
+    private func receive(_ event: SpeechTimeline.Event) {
+        switch event {
+        case .utteranceStarted:
+            guard let utterance = timeline.current else { return }
+            let documentChanged = chunks != utterance.chunks
+
+            resetPlaybackTracking(clearCurrentChunk: true, resetPosition: true)
+            if documentChanged {
+                setDocument(chunks: utterance.chunks)
+            }
+            currentChunkIndex = utterance.baseIndex
+            setState(.playing)
+
+            if documentChanged {
+                onDocumentChanged?()
+            }
+            onProgressChanged?(0, currentChunkIndex)
+            startPositionTimer()
+
+        case .chunkTimed(let globalIndex):
+            guard let timing = timeline.current?.timings[globalIndex] else { return }
+            receive(timing, globalIndex: globalIndex)
+
+        case .utteranceEnded:
+            finishCurrentUtterance()
+        }
+    }
+
+    private func receive(
+        _ timing: ChunkTiming,
+        globalIndex globalChunkIndex: Int,
+        updateAfterAlignment: Bool = true
+    ) {
         guard chunks.indices.contains(globalChunkIndex),
               chunkRanges.indices.contains(globalChunkIndex),
               let displayChunkRange = Range(chunkRanges[globalChunkIndex], in: text)
@@ -281,7 +303,9 @@ final class ReaderSession {
             $0.start == $1.start ? $0.end < $1.end : $0.start < $1.start
         }
 
-        updatePosition()
+        if updateAfterAlignment {
+            updatePosition()
+        }
     }
 
     private func startPositionTimer() {
@@ -358,13 +382,27 @@ final class ReaderSession {
         onStateChanged?(newState)
     }
 
-    private func transitionToIdle(clearCurrentChunk: Bool, resetPosition: Bool) {
+    private func resetPlaybackTracking(clearCurrentChunk: Bool, resetPosition: Bool) {
         invalidatePositionTimer()
         alignedWords.removeAll(keepingCapacity: true)
         timedChunks.removeAll(keepingCapacity: true)
         setActiveWord(nil)
         if clearCurrentChunk { currentChunkIndex = nil }
         if resetPosition { lastKnownPosition = 0 }
+    }
+
+    private func finishCurrentUtterance() {
+        invalidatePositionTimer()
+        setActiveWord(nil)
+        setState(.idle)
+        onProgressChanged?(lastKnownPosition, currentChunkIndex)
+    }
+
+    private func transitionToIdle(clearCurrentChunk: Bool, resetPosition: Bool) {
+        resetPlaybackTracking(
+            clearCurrentChunk: clearCurrentChunk,
+            resetPosition: resetPosition
+        )
         setState(.idle)
         onProgressChanged?(lastKnownPosition, currentChunkIndex)
     }

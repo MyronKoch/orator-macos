@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private var statusItem: NSStatusItem!
     private var engine: OratorEngine?
+    private var timeline: SpeechTimeline?
     private var engineError: String?
     private var hotkeyManager: HotkeyManager?
     private var trustPollTimer: Timer?
@@ -74,7 +75,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ) { [weak self] _ in Task { @MainActor in self?.updateIcon(speaking: true) } }
         NotificationCenter.default.addObserver(
             forName: .oratorSpeechFinished, object: nil, queue: .main
-        ) { [weak self] _ in Task { @MainActor in self?.updateIcon(speaking: false) } }
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.engine?.isSpeaking == false else { return }
+                self.updateIcon(speaking: false)
+            }
+        }
         NotificationCenter.default.addObserver(
             forName: .oratorSpeechPaused, object: nil, queue: .main
         ) { [weak self] _ in Task { @MainActor in self?.rebuildMenu() } }
@@ -85,7 +91,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             forName: .oratorSpeechFinished, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.queuePlaybackActive else { return }
+                guard let self,
+                      self.queuePlaybackActive,
+                      self.engine?.isSpeaking == false
+                else { return }
                 if self.continuousReading {
                     self.playNextInQueue()
                 } else {
@@ -104,13 +113,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func speakText(_ text: String) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, let engine else { return }
+        guard !text.isEmpty, let timeline else { return }
 
         recordHistory(text)
-        DispatchQueue.global(qos: .userInitiated).async {
-            do { try engine.speak(text) }
-            catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
-        }
+        do { try timeline.speak(text: text) }
+        catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
     }
 
     func speakClipboard() {
@@ -135,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     self.engine = engine
+                    self.timeline = SpeechTimeline(engine: engine)
                     engine.currentVoice = self.defaults.string(forKey: Pref.voice) ?? "af_heart"
                     let savedSpeed = self.defaults.float(forKey: Pref.speed)
                     engine.speed = savedSpeed > 0 ? savedSpeed : 1.0
@@ -210,7 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         let readApp = lastReadApp
 
-        guard let engine = engine else { oratorLog("toggle: engine nil"); return }
+        guard let engine, timeline != nil else { oratorLog("toggle: engine nil"); return }
 
         if engine.isSpeaking {
             oratorLog("toggle: was speaking → stop")
@@ -221,7 +229,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         oratorLog("toggle: capturing selection…")
         captureSelectedText { [weak self] text in
-            guard let self = self, let engine = self.engine else { return }
+            guard let self, let engine = self.engine, let timeline = self.timeline else { return }
             guard let text = text, !text.isEmpty else {
                 oratorLog("capture: NO TEXT (copy produced nothing)")
                 return
@@ -241,10 +249,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
 
             self.recordHistory(text)
-            DispatchQueue.global(qos: .userInitiated).async {
-                do { try engine.speak(text) }
-                catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
-            }
+            do { try timeline.speak(text: text) }
+            catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
         }
     }
 
@@ -741,11 +747,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func readHistoryEntry(_ sender: NSMenuItem) {
-        guard let engine, let text = sender.representedObject as? String else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            do { try engine.speak(text) }
-            catch { oratorLog("history speak FAILED: \(error.localizedDescription)") }
-        }
+        guard let timeline, let text = sender.representedObject as? String else { return }
+        do { try timeline.speak(text: text) }
+        catch { oratorLog("history speak FAILED: \(error.localizedDescription)") }
     }
 
     @objc private func toggleRememberHistory() {
@@ -784,17 +788,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             rebuildMenu()
             return
         }
-        guard let engine else {
+        guard let timeline else {
             queuePlaybackActive = false
             rebuildMenu()
             return
         }
 
         let text = readingQueue.removeFirst()
-        DispatchQueue.global(qos: .userInitiated).async {
-            do { try engine.speak(text) }
-            catch { oratorLog("queue speak FAILED: \(error.localizedDescription)") }
-        }
+        do { try timeline.speak(text: text) }
+        catch { oratorLog("queue speak FAILED: \(error.localizedDescription)") }
         rebuildMenu()
     }
 
@@ -814,15 +816,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func openReader() {
+        guard let engine, let timeline else { return }
+
+        if timeline.current != nil {
+            if readerWindowController == nil {
+                readerWindowController = ReaderWindowController(timeline: timeline, engine: engine)
+            }
+            readerWindowController?.showFollowingTimeline()
+            return
+        }
+
         captureSelectedText { [weak self] capturedText in
-            guard let self, let engine = self.engine else { return }
+            guard let self, let engine = self.engine, let timeline = self.timeline else { return }
+
+            // Speech may have started while selection capture was in flight.
+            // Prefer the live timeline in that case and never replace it with
+            // a passive clipboard document.
+            if timeline.current != nil {
+                if self.readerWindowController == nil {
+                    self.readerWindowController = ReaderWindowController(
+                        timeline: timeline,
+                        engine: engine
+                    )
+                }
+                self.readerWindowController?.showFollowingTimeline()
+                return
+            }
+
             let selectedText = capturedText.flatMap { text in
                 text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
             }
             let text = selectedText ?? NSPasteboard.general.string(forType: .string)
 
             if self.readerWindowController == nil {
-                self.readerWindowController = ReaderWindowController(engine: engine)
+                self.readerWindowController = ReaderWindowController(
+                    timeline: timeline,
+                    engine: engine
+                )
             }
             self.readerWindowController?.show(text: text)
         }
@@ -841,13 +871,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
                     let text = try FileTextExtractor.extractText(from: url)
+                    let chunks = TextChunker.chunk(text)
                     DispatchQueue.main.async {
-                        guard let engine = self.engine else { return }
+                        guard let timeline = self.timeline else { return }
                         self.recordHistory(text)
-                        DispatchQueue.global(qos: .userInitiated).async {
-                            do { try engine.speak(text) }
-                            catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
-                        }
+                        do { try timeline.speak(chunks: chunks, from: 0) }
+                        catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
                     }
                 } catch {
                     let message = error.localizedDescription
@@ -971,10 +1000,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func speakTestSentence() {
-        guard let engine = engine else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            do { try engine.speak("Hello! Orator is working. Select any text and press option apostrophe to hear it read aloud.") }
-            catch { NSLog("Orator: test speak failed: %@", error.localizedDescription) }
+        guard let timeline else { return }
+        do {
+            try timeline.speak(
+                text: "Hello! Orator is working. Select any text and press option apostrophe to hear it read aloud."
+            )
+        } catch {
+            NSLog("Orator: test speak failed: %@", error.localizedDescription)
         }
     }
 

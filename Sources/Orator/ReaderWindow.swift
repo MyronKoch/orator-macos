@@ -38,7 +38,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     private let scrollView = NSScrollView()
     private let textView = ReaderTextView(frame: .zero)
     private let emptyMessage = NSTextField(
-        wrappingLabelWithString: "Select or copy text, then choose Open Reader again."
+        wrappingLabelWithString: "Orator isn't reading anything. Select text and press your hotkey, or copy text and reopen the Reader."
     )
     private let progressLabel = NSTextField(labelWithString: "0:00")
     private let backButton = NSButton()
@@ -48,8 +48,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     private var highlightedRange: NSRange?
     private var suppressAutoScrollUntil: TimeInterval = 0
 
-    init(engine: OratorEngine) {
-        session = ReaderSession(engine: engine)
+    init(timeline: SpeechTimeline, engine: OratorEngine) {
+        session = ReaderSession(timeline: timeline, engine: engine)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 760, height: 620),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
@@ -70,8 +70,16 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     func show(text rawText: String?) {
         clearHighlight()
         session.load(rawText: rawText ?? "")
-        displayDocument()
+        presentWindow()
+    }
 
+    func showFollowingTimeline() {
+        clearHighlight()
+        session.syncFromTimeline()
+        presentWindow()
+    }
+
+    private func presentWindow() {
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
         window?.makeFirstResponder(textView)
@@ -254,6 +262,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         }
         session.onProgressChanged = { [weak self] elapsed, chunkIndex in
             self?.updateProgress(elapsed: elapsed, chunkIndex: chunkIndex)
+        }
+        session.onDocumentChanged = { [weak self] in
+            self?.clearHighlight()
+            self?.displayDocument()
         }
     }
 
