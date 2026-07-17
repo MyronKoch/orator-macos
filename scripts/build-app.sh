@@ -42,6 +42,9 @@ cp "$MODEL_SRC" "$APP/Contents/Resources/kokoro-v1_0.safetensors"
 if [ -f Resources/Orator.icns ]; then
   cp Resources/Orator.icns "$APP/Contents/Resources/"
 fi
+for icon in Resources/menubar-idle.png Resources/menubar-speaking.png; do
+  [ -f "$icon" ] && cp "$icon" "$APP/Contents/Resources/"
+done
 
 echo "==> Fixing rpath (SPM binaries expect ../lib)…"
 install_name_tool -add_rpath @executable_path/../Frameworks "$APP/Contents/MacOS/Orator" 2>/dev/null || true
