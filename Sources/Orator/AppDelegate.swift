@@ -91,17 +91,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in Task { @MainActor in self?.rebuildMenu() } }
         NotificationCenter.default.addObserver(
             forName: .oratorSpeechFinished, object: nil, queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] note in
+            let reason = note.userInfo?[OratorFinishReason.key] as? String
             Task { @MainActor in
-                guard let self,
-                      self.queuePlaybackActive,
-                      self.engine?.isSpeaking == false
-                else { return }
-                if self.continuousReading {
-                    self.playNextInQueue()
-                } else {
-                    self.queuePlaybackActive = false
-                    self.rebuildMenu()
+                guard let self, self.engine?.isSpeaking == false else { return }
+
+                // An explicit stop means "silence" - never auto-advance or
+                // auto-start the queue off the back of it.
+                if reason == OratorFinishReason.stopped {
+                    if self.queuePlaybackActive {
+                        self.queuePlaybackActive = false
+                        self.rebuildMenu()
+                    }
+                    return
+                }
+
+                if self.queuePlaybackActive {
+                    if self.continuousReading {
+                        self.playNextInQueue()
+                    } else {
+                        self.queuePlaybackActive = false
+                        self.rebuildMenu()
+                    }
+                } else if !self.readingQueue.isEmpty, self.continuousReading {
+                    // Non-queue speech (hotkey, Reader, menu) finished while
+                    // items wait: the queue is "up next" - start it.
+                    oratorLog("queue: auto-starting after speech completed (\(self.readingQueue.count) queued)")
+                    self.startQueuePlayback()
                 }
             }
         }
@@ -879,6 +895,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let text = readingQueue.removeFirst()
+        oratorLog("queue: playing next item (\(readingQueue.count) remaining)")
         do { try timeline.speak(text: text) }
         catch { oratorLog("queue speak FAILED: \(error.localizedDescription)") }
         rebuildMenu()

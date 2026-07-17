@@ -11,6 +11,17 @@ extension Notification.Name {
     static let oratorSpeechResumed = Notification.Name("oratorSpeechResumed")
 }
 
+/// userInfo for `.oratorSpeechFinished`: distinguishes an utterance that
+/// played to its natural end from one the user (or a new speak) cut off.
+/// Consumers that chain follow-up playback (the reading queue) must only
+/// act on `completed` - auto-starting anything after an explicit stop
+/// turns "silence, please" into more talking.
+enum OratorFinishReason {
+    static let key = "reason"
+    static let completed = "completed"
+    static let stopped = "stopped"
+}
+
 enum OratorError: LocalizedError {
     case modelNotFound
     case voicesNotFound
@@ -318,7 +329,7 @@ final class OratorEngine: @unchecked Sendable {
         lock.unlock()
 
         player.stop()
-        if wasSpeaking { postFinished() }
+        if wasSpeaking { postFinished(reason: OratorFinishReason.stopped) }
     }
 
     // MARK: - Internals
@@ -382,9 +393,12 @@ final class OratorEngine: @unchecked Sendable {
         }
     }
 
-    private func postFinished() {
+    private func postFinished(reason: String = OratorFinishReason.completed) {
         DispatchQueue.main.async {
-            NotificationCenter.default.post(name: .oratorSpeechFinished, object: nil)
+            NotificationCenter.default.post(
+                name: .oratorSpeechFinished, object: nil,
+                userInfo: [OratorFinishReason.key: reason]
+            )
         }
     }
 }
