@@ -4,7 +4,7 @@ import ServiceManagement
 import UniformTypeIdentifiers
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
 
     static weak var shared: AppDelegate?
 
@@ -12,17 +12,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private var statusItem: NSStatusItem!
     private var engine: OratorEngine?
+    private var timeline: SpeechTimeline?
     private var engineError: String?
     private var hotkeyManager: HotkeyManager?
     private var trustPollTimer: Timer?
     private var onboardingWindow: NSWindow?
     private var onboardingStatusLabel: NSTextField?
-    private var hotkeyRecorderWindow: NSWindow?
-    private var hotkeyRecorderLabel: NSTextField?
-    private var hotkeyRecordButton: NSButton?
-    private var hotkeyRecorderMonitor: Any?
+    private var hotkeyRecorderWindowController: HotkeyRecorderWindowController?
     private var pronunciationsEditor: PronunciationsEditor?
     private var appVoiceProfilesEditor: AppVoiceProfilesEditor?
+    private var readerWindowController: ReaderWindowController?
     private var previewAudioPlayer: AVAudioPlayer?
     private var isPreviewRenderInFlight = false
     private var lastReadApp: (bundleID: String, name: String)?
@@ -47,12 +46,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         static let hotkeyKeyCode = "hotkeyKeyCode"
         static let hotkeyModifiers = "hotkeyModifiers"
         static let hotkeyDisplay = "hotkeyDisplay"
+        static let hotkeyPauseKeyCode = "hotkeyPauseKeyCode"
+        static let hotkeyPauseModifiers = "hotkeyPauseModifiers"
+        static let hotkeyPauseDisplay = "hotkeyPauseDisplay"
+        static let hotkeyQueueKeyCode = "hotkeyQueueKeyCode"
+        static let hotkeyQueueModifiers = "hotkeyQueueModifiers"
+        static let hotkeyQueueDisplay = "hotkeyQueueDisplay"
     }
     private static let speedOptions: [Float] = [0.8, 0.9, 1.0, 1.1, 1.25, 1.5]
 
     // Option + ' (US keyboard apostrophe = keyCode 39)
-    private let hotKeyCode: UInt16 = 39
-    static let hotKeyLabel = "\u{2325} '"
+    static let hotKeyLabel = "⌥'"
 
     // MARK: - Launch
 
@@ -73,17 +77,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ) { [weak self] _ in Task { @MainActor in self?.updateIcon(speaking: true) } }
         NotificationCenter.default.addObserver(
             forName: .oratorSpeechFinished, object: nil, queue: .main
-        ) { [weak self] _ in Task { @MainActor in self?.updateIcon(speaking: false) } }
-        NotificationCenter.default.addObserver(
-            forName: .oratorSpeechFinished, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.queuePlaybackActive else { return }
-                if self.continuousReading {
-                    self.playNextInQueue()
-                } else {
-                    self.queuePlaybackActive = false
-                    self.rebuildMenu()
+                guard let self, self.engine?.isSpeaking == false else { return }
+                self.updateIcon(speaking: false)
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: .oratorSpeechPaused, object: nil, queue: .main
+        ) { [weak self] _ in Task { @MainActor in self?.rebuildMenu() } }
+        NotificationCenter.default.addObserver(
+            forName: .oratorSpeechResumed, object: nil, queue: .main
+        ) { [weak self] _ in Task { @MainActor in self?.rebuildMenu() } }
+        NotificationCenter.default.addObserver(
+            forName: .oratorSpeechFinished, object: nil, queue: .main
+        ) { [weak self] note in
+            let reason = note.userInfo?[OratorFinishReason.key] as? String
+            Task { @MainActor in
+                guard let self, self.engine?.isSpeaking == false else { return }
+
+                // An explicit stop means "silence" - never auto-advance or
+                // auto-start the queue off the back of it.
+                if reason == OratorFinishReason.stopped {
+                    if self.queuePlaybackActive {
+                        self.queuePlaybackActive = false
+                        self.rebuildMenu()
+                    }
+                    return
+                }
+
+                if self.queuePlaybackActive {
+                    if self.continuousReading {
+                        self.playNextInQueue()
+                    } else {
+                        self.queuePlaybackActive = false
+                        self.rebuildMenu()
+                    }
+                } else if !self.readingQueue.isEmpty, self.continuousReading {
+                    // Non-queue speech (hotkey, Reader, menu) finished while
+                    // items wait: the queue is "up next" - start it.
+                    oratorLog("queue: auto-starting after speech completed (\(self.readingQueue.count) queued)")
+                    self.startQueuePlayback()
                 }
             }
         }
@@ -97,13 +131,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func speakText(_ text: String) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, let engine else { return }
+        guard !text.isEmpty, let timeline else { return }
 
         recordHistory(text)
-        DispatchQueue.global(qos: .userInitiated).async {
-            do { try engine.speak(text) }
-            catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
-        }
+        do { try timeline.speak(text: text) }
+        catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
     }
 
     func speakClipboard() {
@@ -128,6 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     self.engine = engine
+                    self.timeline = SpeechTimeline(engine: engine)
                     engine.currentVoice = self.defaults.string(forKey: Pref.voice) ?? "af_heart"
                     let savedSpeed = self.defaults.float(forKey: Pref.speed)
                     engine.speed = savedSpeed > 0 ? savedSpeed : 1.0
@@ -151,29 +184,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func installKeyMonitor() {
         guard hotkeyManager == nil else { return }
-        let manager = HotkeyManager { [weak self] in
-            Task { @MainActor in self?.toggleSpeech() }
+        let manager = HotkeyManager { [weak self] action in
+            Task { @MainActor in
+                switch action {
+                case .speak: self?.toggleSpeech()
+                case .pause: self?.togglePauseResume()
+                case .queue: self?.queueSelection()
+                }
+            }
         }
         manager.installAll()
-        hotkeyManager = manager
-        if let savedHotkey {
-            manager.reconfigure(keyCode: savedHotkey.keyCode, modifiers: savedHotkey.modifiers)
+        for action in HotkeyAction.allCases {
+            guard let savedHotkey = savedHotkey(for: action) else { continue }
+            manager.reconfigure(
+                action,
+                keyCode: savedHotkey.keyCode,
+                modifiers: savedHotkey.modifiers
+            )
         }
+        hotkeyManager = manager
+        hotkeyRecorderWindowController?.setHotkeyManager(manager)
         rebuildMenu()
     }
 
-    private var savedHotkey: (keyCode: UInt16, modifiers: NSEvent.ModifierFlags, display: String)? {
-        guard let keyCodeNumber = defaults.object(forKey: Pref.hotkeyKeyCode) as? NSNumber,
-              let modifiersNumber = defaults.object(forKey: Pref.hotkeyModifiers) as? NSNumber,
-              let display = defaults.string(forKey: Pref.hotkeyDisplay),
+    private var hotkeyPreferenceKeys: [
+        HotkeyAction: HotkeyRecorderWindowController.PreferenceKeys
+    ] {
+        [
+            .speak: .init(
+                keyCode: Pref.hotkeyKeyCode,
+                modifiers: Pref.hotkeyModifiers,
+                display: Pref.hotkeyDisplay
+            ),
+            .pause: .init(
+                keyCode: Pref.hotkeyPauseKeyCode,
+                modifiers: Pref.hotkeyPauseModifiers,
+                display: Pref.hotkeyPauseDisplay
+            ),
+            .queue: .init(
+                keyCode: Pref.hotkeyQueueKeyCode,
+                modifiers: Pref.hotkeyQueueModifiers,
+                display: Pref.hotkeyQueueDisplay
+            ),
+        ]
+    }
+
+    private func savedHotkey(
+        for action: HotkeyAction
+    ) -> (keyCode: UInt16, modifiers: NSEvent.ModifierFlags, display: String)? {
+        guard let keys = hotkeyPreferenceKeys[action],
+              let keyCodeNumber = defaults.object(forKey: keys.keyCode) as? NSNumber,
+              let modifiersNumber = defaults.object(forKey: keys.modifiers) as? NSNumber,
               keyCodeNumber.uint64Value <= UInt64(UInt16.max)
         else { return nil }
 
+        let keyCode = UInt16(keyCodeNumber.uint64Value)
+        let modifiers = NSEvent.ModifierFlags(rawValue: UInt(modifiersNumber.uint64Value))
+            .intersection([.command, .option, .control, .shift])
+        // Invalid historical/manual values must never register Return or an
+        // unmodified global key. Valid legacy speak preferences still use the
+        // original three key names above.
+        guard keyCode != 36, !modifiers.isEmpty else { return nil }
+
         return (
-            UInt16(keyCodeNumber.uint64Value),
-            NSEvent.ModifierFlags(rawValue: UInt(modifiersNumber.uint64Value)),
-            display
+            keyCode,
+            modifiers,
+            defaults.string(forKey: keys.display)
+                ?? HotkeyRecorderWindowController.defaultDisplay(for: action)
         )
+    }
+
+    private func hotkeyDisplay(for action: HotkeyAction) -> String {
+        savedHotkey(for: action)?.display
+            ?? HotkeyRecorderWindowController.defaultDisplay(for: action)
     }
 
     private func startTrustPolling() {
@@ -201,7 +284,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         let readApp = lastReadApp
 
-        guard let engine = engine else { oratorLog("toggle: engine nil"); return }
+        guard let engine, timeline != nil else { oratorLog("toggle: engine nil"); return }
 
         if engine.isSpeaking {
             oratorLog("toggle: was speaking → stop")
@@ -212,7 +295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         oratorLog("toggle: capturing selection…")
         captureSelectedText { [weak self] text in
-            guard let self = self, let engine = self.engine else { return }
+            guard let self, let engine = self.engine, let timeline = self.timeline else { return }
             guard let text = text, !text.isEmpty else {
                 oratorLog("capture: NO TEXT (copy produced nothing)")
                 return
@@ -232,10 +315,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
 
             self.recordHistory(text)
-            DispatchQueue.global(qos: .userInitiated).async {
-                do { try engine.speak(text) }
-                catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
-            }
+            do { try timeline.speak(text: text) }
+            catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
         }
     }
 
@@ -298,7 +379,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         rebuildMenu()
     }
 
+    /// The Orator bust as menu-bar template images (monochrome + alpha, 18pt).
+    /// Idle shows the head alone; while speaking, the logo's sound waves
+    /// appear beside it. Both share identical head geometry so the state
+    /// change reads as waves materializing, not the icon jumping.
+    /// (An accent-tint approach was tried first and rejected: tinted template
+    /// icons disappear against wallpaper-tinted menu bars.)
+    private static let menuBarIdleIcon = loadMenuBarIcon(named: "menubar-idle")
+    private static let menuBarSpeakingIcon = loadMenuBarIcon(named: "menubar-speaking")
+
+    private static func loadMenuBarIcon(named name: String) -> NSImage? {
+        guard let url = Bundle.main.url(forResource: name, withExtension: "png"),
+              let image = NSImage(contentsOf: url) else { return nil }
+        image.size = NSSize(width: 18, height: 18)
+        image.isTemplate = true
+        image.accessibilityDescription = "Orator"
+        return image
+    }
+
     private func updateIcon(speaking: Bool) {
+        if let icon = speaking ? Self.menuBarSpeakingIcon : Self.menuBarIdleIcon {
+            statusItem.button?.image = icon
+            return
+        }
+        // Fallback if the bundled assets are ever missing.
         let symbol = speaking ? "waveform.circle.fill" : "waveform.circle"
         statusItem.button?.image = NSImage(
             systemSymbolName: symbol, accessibilityDescription: "Orator"
@@ -347,9 +451,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             speakClipboard.target = self
             menu.addItem(speakClipboard)
 
+            let openReader = NSMenuItem(title: "Open Reader…", action: #selector(openReader), keyEquivalent: "")
+            openReader.target = self
+            menu.addItem(openReader)
+
             let stopItem = NSMenuItem(title: "Stop Speaking", action: #selector(stopSpeaking), keyEquivalent: "")
             stopItem.target = self
             menu.addItem(stopItem)
+
+            let pauseActionTitle = engine?.isPaused == true ? "Resume Speaking" : "Pause Speaking"
+            let pauseTitle = "\(pauseActionTitle) (\(hotkeyDisplay(for: .pause)))"
+            let pauseItem = NSMenuItem(title: pauseTitle, action: #selector(pauseResumeSpeaking), keyEquivalent: "")
+            pauseItem.target = self
+            menu.addItem(pauseItem)
             menu.addItem(.separator())
 
             let queueRoot = NSMenuItem(title: "Queue", action: nil, keyEquivalent: "")
@@ -571,7 +685,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         let recordShortcut = NSMenuItem(
-            title: "Record Shortcut…",
+            title: "Keyboard Shortcuts…",
             action: #selector(openHotkeyRecorder),
             keyEquivalent: ""
         )
@@ -631,7 +745,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func openHotkeyRecorder() {
-        showHotkeyRecorder()
+        if hotkeyRecorderWindowController == nil {
+            hotkeyRecorderWindowController = HotkeyRecorderWindowController(
+                hotkeyManager: hotkeyManager,
+                defaults: defaults,
+                preferenceKeys: hotkeyPreferenceKeys,
+                onBindingChanged: { [weak self] in
+                    self?.rebuildMenu()
+                }
+            )
+        }
+        hotkeyRecorderWindowController?.show()
     }
 
     @objc private func saveVoiceForLastReadApp() {
@@ -723,11 +847,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func readHistoryEntry(_ sender: NSMenuItem) {
-        guard let engine, let text = sender.representedObject as? String else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            do { try engine.speak(text) }
-            catch { oratorLog("history speak FAILED: \(error.localizedDescription)") }
-        }
+        guard let timeline, let text = sender.representedObject as? String else { return }
+        do { try timeline.speak(text: text) }
+        catch { oratorLog("history speak FAILED: \(error.localizedDescription)") }
     }
 
     @objc private func toggleRememberHistory() {
@@ -766,17 +888,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             rebuildMenu()
             return
         }
-        guard let engine else {
+        guard let timeline else {
             queuePlaybackActive = false
             rebuildMenu()
             return
         }
 
         let text = readingQueue.removeFirst()
-        DispatchQueue.global(qos: .userInitiated).async {
-            do { try engine.speak(text) }
-            catch { oratorLog("queue speak FAILED: \(error.localizedDescription)") }
-        }
+        oratorLog("queue: playing next item (\(readingQueue.count) remaining)")
+        do { try timeline.speak(text: text) }
+        catch { oratorLog("queue speak FAILED: \(error.localizedDescription)") }
         rebuildMenu()
     }
 
@@ -795,6 +916,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         speakClipboard()
     }
 
+    @objc private func openReader() {
+        guard let engine, let timeline else { return }
+
+        if timeline.current != nil {
+            if readerWindowController == nil {
+                readerWindowController = ReaderWindowController(timeline: timeline, engine: engine)
+            }
+            readerWindowController?.showFollowingTimeline()
+            return
+        }
+
+        captureSelectedText { [weak self] capturedText in
+            guard let self, let engine = self.engine, let timeline = self.timeline else { return }
+
+            // Speech may have started while selection capture was in flight.
+            // Prefer the live timeline in that case and never replace it with
+            // a passive clipboard document.
+            if timeline.current != nil {
+                if self.readerWindowController == nil {
+                    self.readerWindowController = ReaderWindowController(
+                        timeline: timeline,
+                        engine: engine
+                    )
+                }
+                self.readerWindowController?.showFollowingTimeline()
+                return
+            }
+
+            let selectedText = capturedText.flatMap { text in
+                text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
+            }
+            let text = selectedText ?? NSPasteboard.general.string(forType: .string)
+
+            if self.readerWindowController == nil {
+                self.readerWindowController = ReaderWindowController(
+                    timeline: timeline,
+                    engine: engine
+                )
+            }
+            self.readerWindowController?.show(text: text)
+        }
+    }
+
     @objc private func readFile() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = FileTextExtractor.supportedTypes
@@ -808,13 +972,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
                     let text = try FileTextExtractor.extractText(from: url)
+                    let chunks = TextChunker.chunk(text)
                     DispatchQueue.main.async {
-                        guard let engine = self.engine else { return }
+                        guard let timeline = self.timeline else { return }
                         self.recordHistory(text)
-                        DispatchQueue.global(qos: .userInitiated).async {
-                            do { try engine.speak(text) }
-                            catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
-                        }
+                        do { try timeline.speak(chunks: chunks, from: 0) }
+                        catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
                     }
                 } catch {
                     let message = error.localizedDescription
@@ -938,10 +1101,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func speakTestSentence() {
-        guard let engine = engine else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            do { try engine.speak("Hello! Orator is working. Select any text and press option apostrophe to hear it read aloud.") }
-            catch { NSLog("Orator: test speak failed: %@", error.localizedDescription) }
+        guard let timeline else { return }
+        do {
+            try timeline.speak(
+                text: "Hello! Orator is working. Select any text and press option apostrophe to hear it read aloud."
+            )
+        } catch {
+            NSLog("Orator: test speak failed: %@", error.localizedDescription)
         }
     }
 
@@ -949,6 +1115,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         queuePlaybackActive = false
         engine?.stop()
         rebuildMenu()
+    }
+
+    @objc private func pauseResumeSpeaking() {
+        togglePauseResume()
+    }
+
+    /// Global queue hotkey (Option+Q): capture the current selection
+    /// (clipboard fallback) and append it to the reading queue without
+    /// interrupting whatever is speaking. Queue semantics match the menu:
+    /// adding while idle starts queue playback.
+    private func queueSelection() {
+        captureSelectedText { [weak self] captured in
+            guard let self else { return }
+            let selected = captured.flatMap { text in
+                text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
+            }
+            let text = selected ?? NSPasteboard.general.string(forType: .string)
+            oratorLog("queue hotkey: captured len=\(text?.count ?? -1)")
+            let hadText = !(text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            self.addToReadingQueue(text)
+            if hadText, let text {
+                self.showNotification("Added to queue", body: String(text.prefix(80)))
+            }
+        }
+    }
+
+    /// Global pause/resume toggle (Option+P hotkey and menu item). No-ops
+    /// when nothing is speaking; the engine posts paused/resumed
+    /// notifications that keep the Reader window and menu in sync.
+    private func togglePauseResume() {
+        guard let engine else { return }
+        if engine.isPaused {
+            engine.resume()
+        } else if engine.isSpeaking {
+            engine.pause()
+        }
     }
 
     @objc private func openOnboarding() {
@@ -969,151 +1171,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if FileManager.default.fileExists(atPath: url.path) {
             try? FileManager.default.removeItem(at: url)
         }
-    }
-
-    // MARK: - Hotkey recorder window
-
-    private func showHotkeyRecorder() {
-        if let window = hotkeyRecorderWindow {
-            hotkeyRecorderLabel?.stringValue = savedHotkey?.display ?? Self.hotKeyLabel
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 430, height: 220),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Keyboard Shortcut"
-        window.center()
-        window.isReleasedWhenClosed = false
-        window.delegate = self
-
-        let content = NSStackView()
-        content.orientation = .vertical
-        content.alignment = .leading
-        content.spacing = 12
-        content.edgeInsets = NSEdgeInsets(top: 22, left: 24, bottom: 22, right: 24)
-
-        let heading = NSTextField(labelWithString: "Keyboard Shortcut")
-        heading.font = .systemFont(ofSize: 20, weight: .semibold)
-
-        let currentLabel = NSTextField(labelWithString: "Current shortcut")
-        currentLabel.font = .systemFont(ofSize: 13)
-        currentLabel.textColor = .secondaryLabelColor
-
-        let shortcutLabel = NSTextField(labelWithString: savedHotkey?.display ?? Self.hotKeyLabel)
-        shortcutLabel.font = .systemFont(ofSize: 18, weight: .medium)
-
-        let recordButton = NSButton(title: "Record", target: self, action: #selector(beginRecordingHotkey))
-        recordButton.bezelStyle = .rounded
-        let resetButton = NSButton(title: "Reset to Default", target: self, action: #selector(resetHotkeyToDefault))
-        resetButton.bezelStyle = .rounded
-
-        let buttons = NSStackView(views: [recordButton, resetButton])
-        buttons.orientation = .horizontal
-        buttons.spacing = 8
-
-        let helper = NSTextField(
-            wrappingLabelWithString: "Press a key combination with at least one modifier (⌘ ⌥ ⌃ ⇧)."
-        )
-        helper.font = .systemFont(ofSize: 12)
-        helper.textColor = .secondaryLabelColor
-        helper.preferredMaxLayoutWidth = 382
-
-        content.addArrangedSubview(heading)
-        content.addArrangedSubview(currentLabel)
-        content.addArrangedSubview(shortcutLabel)
-        content.addArrangedSubview(buttons)
-        content.addArrangedSubview(helper)
-
-        window.contentView = content
-        hotkeyRecorderWindow = window
-        hotkeyRecorderLabel = shortcutLabel
-        hotkeyRecordButton = recordButton
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    @objc private func beginRecordingHotkey() {
-        stopHotkeyRecording()
-        hotkeyRecordButton?.title = "Recording…"
-        hotkeyRecordButton?.isEnabled = false
-
-        hotkeyRecorderMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            let shouldConsume = MainActor.assumeIsolated {
-                guard let self else { return false }
-                return self.recordHotkey(from: event)
-            }
-            return shouldConsume ? nil : event
-        }
-    }
-
-    private func recordHotkey(from event: NSEvent) -> Bool {
-        guard !isStandaloneModifierKey(event.keyCode) else { return false }
-
-        let modifiers = event.modifierFlags.intersection([.option, .command, .control, .shift])
-        guard !modifiers.isEmpty else { return false }
-
-        var display = ""
-        if modifiers.contains(.command) { display += "⌘" }
-        if modifiers.contains(.option) { display += "⌥" }
-        if modifiers.contains(.control) { display += "⌃" }
-        if modifiers.contains(.shift) { display += "⇧" }
-        if let characters = event.charactersIgnoringModifiers?.uppercased(), !characters.isEmpty {
-            display += characters
-        } else {
-            display += "\(event.keyCode)"
-        }
-
-        defaults.set(Int(event.keyCode), forKey: Pref.hotkeyKeyCode)
-        defaults.set(modifiers.rawValue, forKey: Pref.hotkeyModifiers)
-        defaults.set(display, forKey: Pref.hotkeyDisplay)
-        hotkeyManager?.reconfigure(keyCode: event.keyCode, modifiers: modifiers)
-        hotkeyRecorderLabel?.stringValue = display
-        stopHotkeyRecording()
-        return true
-    }
-
-    private func isStandaloneModifierKey(_ keyCode: UInt16) -> Bool {
-        switch keyCode {
-        case 54, 55, 56, 57, 58, 59, 60, 61, 62, 63:
-            return true
-        default:
-            return false
-        }
-    }
-
-    @objc private func resetHotkeyToDefault() {
-        stopHotkeyRecording()
-        defaults.removeObject(forKey: Pref.hotkeyKeyCode)
-        defaults.removeObject(forKey: Pref.hotkeyModifiers)
-        defaults.removeObject(forKey: Pref.hotkeyDisplay)
-        hotkeyManager?.reconfigure(keyCode: hotKeyCode, modifiers: [.option])
-        hotkeyRecorderLabel?.stringValue = Self.hotKeyLabel
-    }
-
-    private func stopHotkeyRecording() {
-        if let monitor = hotkeyRecorderMonitor {
-            NSEvent.removeMonitor(monitor)
-            hotkeyRecorderMonitor = nil
-        }
-        hotkeyRecordButton?.title = "Record"
-        hotkeyRecordButton?.isEnabled = true
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow,
-              window === hotkeyRecorderWindow
-        else { return }
-
-        stopHotkeyRecording()
-        hotkeyRecorderWindow = nil
-        hotkeyRecorderLabel = nil
-        hotkeyRecordButton = nil
     }
 
     // MARK: - Onboarding window
