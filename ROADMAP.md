@@ -8,6 +8,14 @@ Orator does one thing well: highlight text anywhere, press a key, hear it in a n
 
 ---
 
+## Shipped (v1.2.0)
+
+- **Reader window with karaoke follow-along highlighting** (the Tier 0 flagship) - a live-follow lens on whatever Orator is reading, from any entry point: word-by-word highlighting, auto-scroll with manual-scroll hysteresis, click-a-sentence-to-jump, pause/resume, sentence skip. Opening it never interrupts speech.
+- **Global pause/resume hotkey** (default ⌥P), synced everywhere (menu, Reader).
+- **Queue-selection hotkey** (default ⌥Q) - queue reading material without interrupting the current read; the queue auto-plays when speech finishes naturally, and an explicit stop always means silence.
+- **Keyboard Shortcuts window** - record custom chords for all three actions, with conflict detection (Return-based chords are refused by design).
+- **Menu bar identity** - the Orator bust as a template icon; the logo's sound waves appear while speaking.
+
 ## Shipped (v1.0.0 → v1.1.1)
 
 - System-wide highlight-to-speak (global hotkey, triple-path capture) with 26 Kokoro voices, speed control
@@ -28,10 +36,10 @@ Orator does one thing well: highlight text anywhere, press a key, hear it in a n
 A showpiece is a flagship demo moment + design polish + distribution + engineering credibility, not just more features.
 
 ### Tier 0 — The Flagship
-- **Reader window with karaoke follow-along highlighting** — a clean reading view where the word lights up as it's spoken, auto-scroll, click-any-word-to-jump, pause/resume, sentence skip. *The* demo feature. Requires surfacing word/sentence timing out of the Kokoro/MLX engine (maintainer core work) + a beautiful window (Codex).
+- ~~**Reader window with karaoke follow-along highlighting**~~ **SHIPPED in v1.2.0**, upgraded past this spec: it live-follows any utterance from any entry point.
 
 ### Tier 1 — Design & UX polish
-- **Real Preferences window** (SwiftUI, tabbed: General / Voices / Pronunciations / Shortcuts / Advanced) instead of menu-bar-only settings.
+- **Real Preferences window** (AppKit, tabbed: General / Voices / Pronunciations / Shortcuts / Advanced) instead of menu-bar-only settings. (The app is deliberately pure AppKit - no SwiftUI.)
 - **Unified visual redesign** of all windows (onboarding, pronunciation, per-app voices, recorder) into one design system.
 - **Polished onboarding** with live voice previews and a "try it now" moment.
 - App-icon refinement + animated menu-bar states.
