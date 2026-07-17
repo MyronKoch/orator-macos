@@ -76,6 +76,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             forName: .oratorSpeechFinished, object: nil, queue: .main
         ) { [weak self] _ in Task { @MainActor in self?.updateIcon(speaking: false) } }
         NotificationCenter.default.addObserver(
+            forName: .oratorSpeechPaused, object: nil, queue: .main
+        ) { [weak self] _ in Task { @MainActor in self?.rebuildMenu() } }
+        NotificationCenter.default.addObserver(
+            forName: .oratorSpeechResumed, object: nil, queue: .main
+        ) { [weak self] _ in Task { @MainActor in self?.rebuildMenu() } }
+        NotificationCenter.default.addObserver(
             forName: .oratorSpeechFinished, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
@@ -152,9 +158,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func installKeyMonitor() {
         guard hotkeyManager == nil else { return }
-        let manager = HotkeyManager { [weak self] in
+        let manager = HotkeyManager(onFire: { [weak self] in
             Task { @MainActor in self?.toggleSpeech() }
-        }
+        }, onPauseFire: { [weak self] in
+            Task { @MainActor in self?.togglePauseResume() }
+        })
         manager.installAll()
         hotkeyManager = manager
         if let savedHotkey {
@@ -355,6 +363,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let stopItem = NSMenuItem(title: "Stop Speaking", action: #selector(stopSpeaking), keyEquivalent: "")
             stopItem.target = self
             menu.addItem(stopItem)
+
+            let pauseTitle = engine?.isPaused == true ? "Resume Speaking" : "Pause Speaking"
+            let pauseItem = NSMenuItem(title: pauseTitle, action: #selector(pauseResumeSpeaking), keyEquivalent: "")
+            pauseItem.target = self
+            menu.addItem(pauseItem)
             menu.addItem(.separator())
 
             let queueRoot = NSMenuItem(title: "Queue", action: nil, keyEquivalent: "")
@@ -969,6 +982,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         queuePlaybackActive = false
         engine?.stop()
         rebuildMenu()
+    }
+
+    @objc private func pauseResumeSpeaking() {
+        togglePauseResume()
+    }
+
+    /// Global pause/resume toggle (Option+P hotkey and menu item). No-ops
+    /// when nothing is speaking; the engine posts paused/resumed
+    /// notifications that keep the Reader window and menu in sync.
+    private func togglePauseResume() {
+        guard let engine else { return }
+        if engine.isPaused {
+            engine.resume()
+        } else if engine.isSpeaking {
+            engine.pause()
+        }
     }
 
     @objc private func openOnboarding() {
