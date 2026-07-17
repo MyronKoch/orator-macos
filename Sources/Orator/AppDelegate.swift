@@ -166,11 +166,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func installKeyMonitor() {
         guard hotkeyManager == nil else { return }
-        let manager = HotkeyManager(onFire: { [weak self] in
-            Task { @MainActor in self?.toggleSpeech() }
-        }, onPauseFire: { [weak self] in
-            Task { @MainActor in self?.togglePauseResume() }
-        })
+        let manager = HotkeyManager { [weak self] action in
+            Task { @MainActor in
+                switch action {
+                case .speak: self?.toggleSpeech()
+                case .pause: self?.togglePauseResume()
+                case .queue: self?.queueSelection()
+                }
+            }
+        }
         manager.installAll()
         hotkeyManager = manager
         if let savedHotkey {
@@ -1041,6 +1045,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func pauseResumeSpeaking() {
         togglePauseResume()
+    }
+
+    /// Global queue hotkey (Option+Q): capture the current selection
+    /// (clipboard fallback) and append it to the reading queue without
+    /// interrupting whatever is speaking. Queue semantics match the menu:
+    /// adding while idle starts queue playback.
+    private func queueSelection() {
+        captureSelectedText { [weak self] captured in
+            guard let self else { return }
+            let selected = captured.flatMap { text in
+                text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
+            }
+            let text = selected ?? NSPasteboard.general.string(forType: .string)
+            oratorLog("queue hotkey: captured len=\(text?.count ?? -1)")
+            let hadText = !(text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            self.addToReadingQueue(text)
+            if hadText, let text {
+                self.showNotification("Added to queue", body: String(text.prefix(80)))
+            }
+        }
     }
 
     /// Global pause/resume toggle (Option+P hotkey and menu item). No-ops
