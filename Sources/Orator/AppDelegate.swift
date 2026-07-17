@@ -313,7 +313,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         rebuildMenu()
     }
 
+    /// The Orator bust as menu-bar template images (monochrome + alpha, 18pt).
+    /// Idle shows the head alone; while speaking, the logo's sound waves
+    /// appear beside it. Both share identical head geometry so the state
+    /// change reads as waves materializing, not the icon jumping.
+    /// (An accent-tint approach was tried first and rejected: tinted template
+    /// icons disappear against wallpaper-tinted menu bars.)
+    private static let menuBarIdleIcon = loadMenuBarIcon(named: "menubar-idle")
+    private static let menuBarSpeakingIcon = loadMenuBarIcon(named: "menubar-speaking")
+
+    private static func loadMenuBarIcon(named name: String) -> NSImage? {
+        guard let url = Bundle.main.url(forResource: name, withExtension: "png"),
+              let image = NSImage(contentsOf: url) else { return nil }
+        image.size = NSSize(width: 18, height: 18)
+        image.isTemplate = true
+        image.accessibilityDescription = "Orator"
+        return image
+    }
+
     private func updateIcon(speaking: Bool) {
+        if let icon = speaking ? Self.menuBarSpeakingIcon : Self.menuBarIdleIcon {
+            statusItem.button?.image = icon
+            return
+        }
+        // Fallback if the bundled assets are ever missing.
         let symbol = speaking ? "waveform.circle.fill" : "waveform.circle"
         statusItem.button?.image = NSImage(
             systemSymbolName: symbol, accessibilityDescription: "Orator"
