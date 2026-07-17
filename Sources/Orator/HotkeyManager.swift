@@ -18,7 +18,27 @@ func oratorLog(_ message: String) {
     NSLog("Orator: %@", message)
 }
 
-/// Global hotkey listener for Option+' with triple-redundant capture paths.
+/// The global actions a chord can trigger. Each action owns a stable Carbon
+/// hotkey ID so the shared Carbon handler can route events back to it.
+enum HotkeyAction: String, CaseIterable, Sendable {
+    case speak
+    case pause
+    case queue
+
+    var carbonID: UInt32 {
+        switch self {
+        case .speak: return 1
+        case .pause: return 2
+        case .queue: return 3
+        }
+    }
+
+    static func from(carbonID id: UInt32) -> HotkeyAction? {
+        allCases.first { $0.carbonID == id }
+    }
+}
+
+/// Global hotkey listener with triple-redundant capture paths.
 ///
 /// macOS has three ways to observe global keystrokes, each with different
 /// permission requirements that have shifted across OS releases:
@@ -26,27 +46,44 @@ func oratorLog(_ message: String) {
 ///   2. NSEvent global monitor      - Accessibility or Input Monitoring
 ///   3. CGEventTap (listen-only)    - Accessibility (session tap) / Input Monitoring
 ///
-/// We install all three and dedupe: whichever fires first within a debounce
-/// window wins. A debug log at /tmp/orator-hotkey.log records which paths
-/// actually deliver events on this machine.
+/// We install all three and dedupe: whichever fires first within a per-action
+/// debounce window wins. A debug log at /tmp/orator-hotkey.log records which
+/// paths actually deliver events on this machine.
+///
+/// Multiple actions are supported via a binding table; each action carries a
+/// stable Carbon hotkey ID and its own debounce clock. All mutation happens on
+/// the main thread, and all three capture paths deliver on the main run loop.
 final class HotkeyManager: @unchecked Sendable {
 
-    private var keyCode: UInt16 = 39                    // default: apostrophe
-    private var altKeyCode: UInt16? = nil               // no secondary chord; custom combos are set via the recorder
-    private var modifiers: NSEvent.ModifierFlags = [.option]
+    struct Binding {
+        /// nil disables the action entirely.
+        var keyCode: UInt16?
+        var modifiers: NSEvent.ModifierFlags
+    }
 
-    private var carbonHotKeyRef: EventHotKeyRef?
+    /// Defaults: Option+' speaks, Option+P pauses, Option+Q queues.
+    private var bindings: [HotkeyAction: Binding] = [
+        .speak: Binding(keyCode: 39, modifiers: [.option]),
+        .pause: Binding(keyCode: 35, modifiers: [.option]),
+        .queue: Binding(keyCode: 12, modifiers: [.option]),
+    ]
+    /// Legacy secondary chord for speak. Stays nil; custom combos come from
+    /// the recorder. NEVER default this to Return (keyCode 36) - it was
+    /// removed in v1.1.1 for interfering with normal typing.
+    private var altKeyCode: UInt16? = nil
+
+    private var carbonRefs: [HotkeyAction: EventHotKeyRef] = [:]
     private var carbonInstallStatus: OSStatus?
     private var didInstallCarbonHandler = false
     private var nsEventMonitor: Any?
     private var eventTap: CFMachPort?
     private var tapRunLoopSource: CFRunLoopSource?
 
-    private var lastFire = Date.distantPast
-    private let onFire: () -> Void
+    private var lastFires: [HotkeyAction: Date] = [:]
+    private let onAction: (HotkeyAction) -> Void
 
-    init(onFire: @escaping () -> Void) {
-        self.onFire = onFire
+    init(onAction: @escaping (HotkeyAction) -> Void) {
+        self.onAction = onAction
     }
 
     // MARK: - Public
@@ -54,18 +91,35 @@ final class HotkeyManager: @unchecked Sendable {
     func installAll() {
         requestInputMonitoringIfNeeded()
         installCarbon()
-        registerCarbonHotKey()
+        for action in HotkeyAction.allCases {
+            registerCarbonHotKey(for: action)
+        }
         installNSEventMonitor()
         installEventTap()
         censusEventTaps()
     }
 
+    /// Reconfigure (or disable, with nil keyCode) an action's chord.
+    func reconfigure(_ action: HotkeyAction, keyCode: UInt16?, modifiers: NSEvent.ModifierFlags) {
+        bindings[action] = Binding(keyCode: keyCode, modifiers: modifiers)
+        if action == .speak { altKeyCode = nil }
+        registerCarbonHotKey(for: action)
+        log("hotkey reconfigured: \(action.rawValue) keyCode=\(keyCode.map(String.init) ?? "disabled") modifiers=\(modifiers.rawValue)")
+    }
+
+    /// The current chord for an action (nil keyCode means disabled).
+    func binding(for action: HotkeyAction) -> Binding? {
+        bindings[action]
+    }
+
+    // MARK: - Legacy conveniences (existing call sites)
+
     func reconfigure(keyCode: UInt16, modifiers: NSEvent.ModifierFlags) {
-        self.keyCode = keyCode
-        self.altKeyCode = nil
-        self.modifiers = modifiers
-        registerCarbonHotKey()
-        log("hotkey reconfigured: keyCode=\(keyCode) modifiers=\(modifiers.rawValue)")
+        reconfigure(.speak, keyCode: keyCode, modifiers: modifiers)
+    }
+
+    func reconfigurePause(keyCode: UInt16?, modifiers: NSEvent.ModifierFlags) {
+        reconfigure(.pause, keyCode: keyCode, modifiers: modifiers)
     }
 
     /// Log every process holding a system event tap - identifies key-swallowers.
@@ -93,14 +147,40 @@ final class HotkeyManager: @unchecked Sendable {
         return URL(fileURLWithPath: String(cString: buffer)).lastPathComponent
     }
 
+    /// Match a pressed key against the binding table. Returns the action to
+    /// fire, or nil. The legacy speak alt chord is honored when set.
+    fileprivate func action(forKeyCode keyCode: UInt16, nsModifiers flags: NSEvent.ModifierFlags) -> HotkeyAction? {
+        let pressed = flags.intersection([.option, .command, .control, .shift])
+        for action in HotkeyAction.allCases {
+            guard let binding = bindings[action], let bound = binding.keyCode else { continue }
+            let matchesKey = keyCode == bound
+                || (action == .speak && (altKeyCode.map { keyCode == $0 } ?? false))
+            if matchesKey, pressed == binding.modifiers {
+                return action
+            }
+        }
+        return nil
+    }
+
+    fileprivate func nsModifiers(fromCGFlags flags: CGEventFlags) -> NSEvent.ModifierFlags {
+        var result: NSEvent.ModifierFlags = []
+        if flags.contains(.maskAlternate) { result.insert(.option) }
+        if flags.contains(.maskCommand) { result.insert(.command) }
+        if flags.contains(.maskControl) { result.insert(.control) }
+        if flags.contains(.maskShift) { result.insert(.shift) }
+        return result
+    }
+
     /// Debounced dispatch - three paths may all fire for one keypress.
-    fileprivate func fire(from source: String) {
+    /// Debounce windows are per-action so, e.g., pause right after speak works.
+    fileprivate func fire(from source: String, action: HotkeyAction) {
         log("FIRE via \(source)")
         DispatchQueue.main.async { [self] in
             let now = Date()
-            guard now.timeIntervalSince(lastFire) > 0.3 else { return }
-            lastFire = now
-            onFire()
+            let last = lastFires[action] ?? .distantPast
+            guard now.timeIntervalSince(last) > 0.3 else { return }
+            lastFires[action] = now
+            onAction(action)
         }
     }
 
@@ -108,24 +188,13 @@ final class HotkeyManager: @unchecked Sendable {
         oratorLog(message)
     }
 
-    private var carbonModifiers: UInt32 {
+    private func carbonModifiers(for target: NSEvent.ModifierFlags) -> UInt32 {
         var result: UInt32 = 0
-        if modifiers.contains(.option) { result |= UInt32(optionKey) }
-        if modifiers.contains(.command) { result |= UInt32(cmdKey) }
-        if modifiers.contains(.control) { result |= UInt32(controlKey) }
-        if modifiers.contains(.shift) { result |= UInt32(shiftKey) }
+        if target.contains(.option) { result |= UInt32(optionKey) }
+        if target.contains(.command) { result |= UInt32(cmdKey) }
+        if target.contains(.control) { result |= UInt32(controlKey) }
+        if target.contains(.shift) { result |= UInt32(shiftKey) }
         return result
-    }
-
-    private func matchesCGEventModifiers(_ flags: CGEventFlags) -> Bool {
-        (flags.contains(.maskAlternate) == modifiers.contains(.option))
-            && (flags.contains(.maskCommand) == modifiers.contains(.command))
-            && (flags.contains(.maskControl) == modifiers.contains(.control))
-            && (flags.contains(.maskShift) == modifiers.contains(.shift))
-    }
-
-    private func matchesNSEventModifiers(_ flags: NSEvent.ModifierFlags) -> Bool {
-        flags.intersection([.option, .command, .control, .shift]) == modifiers
     }
 
     // MARK: - Permissions
@@ -153,9 +222,17 @@ final class HotkeyManager: @unchecked Sendable {
         let target = GetEventDispatcherTarget()
         let installStatus = InstallEventHandler(
             target,
-            { (_, _, userData) -> OSStatus in
+            { (_, event, userData) -> OSStatus in
                 guard let userData = userData else { return OSStatus(eventNotHandledErr) }
-                Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue().fire(from: "carbon")
+                var hotKeyID = EventHotKeyID()
+                GetEventParameter(
+                    event, EventParamName(kEventParamDirectObject),
+                    EventParamType(typeEventHotKeyID), nil,
+                    MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID
+                )
+                let manager = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
+                let action = HotkeyAction.from(carbonID: hotKeyID.id) ?? .speak
+                manager.fire(from: "carbon-\(action.rawValue)", action: action)
                 return noErr
             },
             1, &eventType,
@@ -165,19 +242,25 @@ final class HotkeyManager: @unchecked Sendable {
         carbonInstallStatus = installStatus
     }
 
-    private func registerCarbonHotKey() {
-        if let carbonHotKeyRef {
-            UnregisterEventHotKey(carbonHotKeyRef)
-            self.carbonHotKeyRef = nil
+    private func registerCarbonHotKey(for action: HotkeyAction) {
+        if let existing = carbonRefs[action] {
+            UnregisterEventHotKey(existing)
+            carbonRefs[action] = nil
+        }
+        guard let binding = bindings[action], let keyCode = binding.keyCode else {
+            log("carbon \(action.rawValue): disabled")
+            return
         }
 
         let target = GetEventDispatcherTarget()
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4F524154) /* 'ORAT' */, id: 1)
+        let hotKeyID = EventHotKeyID(signature: OSType(0x4F524154) /* 'ORAT' */, id: action.carbonID)
+        var ref: EventHotKeyRef?
         let registerStatus = RegisterEventHotKey(
-            UInt32(keyCode), carbonModifiers, hotKeyID, target, 0, &carbonHotKeyRef
+            UInt32(keyCode), carbonModifiers(for: binding.modifiers), hotKeyID, target, 0, &ref
         )
+        carbonRefs[action] = ref
         let installStatus = carbonInstallStatus ?? OSStatus(eventNotHandledErr)
-        log("carbon install=\(installStatus) register=\(registerStatus)")
+        log("carbon \(action.rawValue) install=\(installStatus) register=\(registerStatus)")
     }
 
     // MARK: - Path 2: NSEvent global monitor
@@ -185,10 +268,9 @@ final class HotkeyManager: @unchecked Sendable {
     private func installNSEventMonitor() {
         nsEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return }
-            let matchesKey = event.keyCode == self.keyCode
-                || (self.altKeyCode.map { event.keyCode == $0 } ?? false)
-            guard matchesKey, self.matchesNSEventModifiers(event.modifierFlags) else { return }
-            self.fire(from: "nsevent")
+            if let action = self.action(forKeyCode: event.keyCode, nsModifiers: event.modifierFlags) {
+                self.fire(from: "nsevent-\(action.rawValue)", action: action)
+            }
         }
         log("nsevent monitor installed=\(nsEventMonitor != nil)")
     }
@@ -200,12 +282,10 @@ final class HotkeyManager: @unchecked Sendable {
         let callback: CGEventTapCallBack = { _, type, event, userInfo in
             if type == .keyDown, let userInfo = userInfo {
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(userInfo).takeUnretainedValue()
-                let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-                let flags = event.flags
-                let matchesKey = keyCode == Int64(manager.keyCode)
-                    || (manager.altKeyCode.map { keyCode == Int64($0) } ?? false)
-                if matchesKey, manager.matchesCGEventModifiers(flags) {
-                    manager.fire(from: "eventtap")
+                let keyCode = UInt16(truncatingIfNeeded: event.getIntegerValueField(.keyboardEventKeycode))
+                let modifiers = manager.nsModifiers(fromCGFlags: event.flags)
+                if let action = manager.action(forKeyCode: keyCode, nsModifiers: modifiers) {
+                    manager.fire(from: "eventtap-\(action.rawValue)", action: action)
                 }
             }
             return Unmanaged.passUnretained(event)
