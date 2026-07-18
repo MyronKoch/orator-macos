@@ -41,13 +41,11 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
 
     private lazy var dashboardController = DashboardViewController(appDelegate: appDelegate)
     private lazy var voicesController = VoicesSettingsViewController(appDelegate: appDelegate)
-    private lazy var pronunciationsController = EmbeddedSettingsViewController(
-        makeView: { [unowned appDelegate] in appDelegate.pronunciationsContentView() },
-        onRefresh: { [unowned appDelegate] in appDelegate.refreshPronunciationsEditor() }
+    private lazy var pronunciationsController = PronunciationsSettingsViewController(
+        appDelegate: appDelegate
     )
-    private lazy var shortcutsController = EmbeddedSettingsViewController(
-        makeView: { [unowned appDelegate] in appDelegate.shortcutsContentView() },
-        onRefresh: { [unowned appDelegate] in appDelegate.refreshShortcutsEditor() }
+    private lazy var shortcutsController = ShortcutsSettingsViewController(
+        appDelegate: appDelegate
     )
     private lazy var generalController = GeneralSettingsViewController(appDelegate: appDelegate)
 
@@ -260,13 +258,71 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
 }
 
 @MainActor
-private final class EmbeddedSettingsViewController: NSViewController {
-    private let makeEmbeddedView: () -> NSView
-    private let onRefresh: () -> Void
+private func makeSettingsScrollView(
+    hosting content: NSView,
+    insets: NSEdgeInsets
+) -> NSView {
+    let rootView = NSView()
 
-    init(makeView: @escaping () -> NSView, onRefresh: @escaping () -> Void) {
-        makeEmbeddedView = makeView
-        self.onRefresh = onRefresh
+    let scrollView = NSScrollView()
+    scrollView.translatesAutoresizingMaskIntoConstraints = false
+    scrollView.hasVerticalScroller = true
+    scrollView.drawsBackground = false
+    scrollView.autohidesScrollers = true
+
+    // A FLIPPED document view anchors its content to the TOP of the clip.
+    // With a plain (non-flipped) NSView, a document shorter than the viewport
+    // sits at the BOTTOM of the clip - which made short tabs (e.g. Shortcuts)
+    // look blank with all their content pushed below the fold.
+    let documentView = FlippedView()
+    documentView.translatesAutoresizingMaskIntoConstraints = false
+    scrollView.documentView = documentView
+
+    content.translatesAutoresizingMaskIntoConstraints = false
+    documentView.addSubview(content)
+    rootView.addSubview(scrollView)
+
+    // Content bottom is <= (not ==) so short content keeps its natural height
+    // (it doesn't stretch), while the document is forced to at least fill the
+    // viewport so content stays pinned to the top. Tall content grows the
+    // document and scrolls.
+    let fillHeight = documentView.heightAnchor.constraint(
+        greaterThanOrEqualTo: scrollView.contentView.heightAnchor
+    )
+    fillHeight.priority = .defaultHigh
+
+    NSLayoutConstraint.activate([
+        scrollView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
+        scrollView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
+        scrollView.topAnchor.constraint(equalTo: rootView.topAnchor),
+        scrollView.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
+
+        documentView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+        documentView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
+        documentView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+        documentView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+        fillHeight,
+        content.leadingAnchor.constraint(equalTo: documentView.leadingAnchor, constant: insets.left),
+        content.trailingAnchor.constraint(equalTo: documentView.trailingAnchor, constant: -insets.right),
+        content.topAnchor.constraint(equalTo: documentView.topAnchor, constant: insets.top),
+        content.bottomAnchor.constraint(lessThanOrEqualTo: documentView.bottomAnchor, constant: -insets.bottom),
+    ])
+
+    return rootView
+}
+
+/// A view whose coordinate origin is top-left, so a scroll document shorter
+/// than its clip anchors content to the top instead of the bottom.
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+@MainActor
+private final class PronunciationsSettingsViewController: NSViewController {
+    private unowned let appDelegate: AppDelegate
+
+    init(appDelegate: AppDelegate) {
+        self.appDelegate = appDelegate
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -275,11 +331,41 @@ private final class EmbeddedSettingsViewController: NSViewController {
     }
 
     override func loadView() {
-        view = makeEmbeddedView()
+        let content = appDelegate.makePronunciationsContentView()
+        view = makeSettingsScrollView(
+            hosting: content,
+            insets: NSEdgeInsets(top: 24, left: 26, bottom: 28, right: 26)
+        )
     }
 
     func refresh() {
-        onRefresh()
+        appDelegate.refreshPronunciationsEditor()
+    }
+}
+
+@MainActor
+private final class ShortcutsSettingsViewController: NSViewController {
+    private unowned let appDelegate: AppDelegate
+
+    init(appDelegate: AppDelegate) {
+        self.appDelegate = appDelegate
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func loadView() {
+        let content = appDelegate.makeShortcutsContentView()
+        view = makeSettingsScrollView(
+            hosting: content,
+            insets: NSEdgeInsets(top: 24, left: 26, bottom: 28, right: 26)
+        )
+    }
+
+    func refresh() {
+        appDelegate.refreshShortcutsEditor()
     }
 }
 
@@ -299,21 +385,11 @@ private final class VoicesSettingsViewController: NSViewController {
     }
 
     override func loadView() {
-        let scrollView = NSScrollView()
-        scrollView.hasVerticalScroller = true
-        scrollView.drawsBackground = false
-        scrollView.autohidesScrollers = true
-
-        let documentView = NSView()
-        documentView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.documentView = documentView
-
         let stack = NSStackView()
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 16
-        documentView.addSubview(stack)
 
         let heading = NSTextField(labelWithString: "Voices")
         heading.font = .systemFont(ofSize: 26, weight: .bold)
@@ -367,29 +443,20 @@ private final class VoicesSettingsViewController: NSViewController {
         ])
         globalBox.contentView = boxContent
 
-        let perApp = appDelegate.appVoiceProfilesContentView()
-        perApp.translatesAutoresizingMaskIntoConstraints = false
-
         stack.addArrangedSubview(heading)
         stack.addArrangedSubview(helper)
         stack.setCustomSpacing(20, after: helper)
         stack.addArrangedSubview(globalBox)
+        let perApp = appDelegate.makeAppVoiceProfilesContentView()
+        perApp.translatesAutoresizingMaskIntoConstraints = false
         stack.addArrangedSubview(perApp)
         globalBox.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         perApp.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
-        NSLayoutConstraint.activate([
-            documentView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-            documentView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-            documentView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
-            documentView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
-            stack.leadingAnchor.constraint(equalTo: documentView.leadingAnchor, constant: 26),
-            stack.trailingAnchor.constraint(equalTo: documentView.trailingAnchor, constant: -26),
-            stack.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 24),
-            stack.bottomAnchor.constraint(equalTo: documentView.bottomAnchor, constant: -28),
-        ])
-
-        view = scrollView
+        view = makeSettingsScrollView(
+            hosting: stack,
+            insets: NSEdgeInsets(top: 24, left: 26, bottom: 28, right: 26)
+        )
         refresh()
     }
 
@@ -515,21 +582,11 @@ private final class GeneralSettingsViewController: NSViewController {
     }
 
     override func loadView() {
-        let scrollView = NSScrollView()
-        scrollView.hasVerticalScroller = true
-        scrollView.drawsBackground = false
-        scrollView.autohidesScrollers = true
-
-        let documentView = NSView()
-        documentView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.documentView = documentView
-
         let content = NSStackView()
         content.translatesAutoresizingMaskIntoConstraints = false
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 14
-        documentView.addSubview(content)
 
         let heading = NSTextField(labelWithString: "General")
         heading.font = .systemFont(ofSize: 26, weight: .bold)
@@ -598,18 +655,10 @@ private final class GeneralSettingsViewController: NSViewController {
         content.addArrangedSubview(aboutHeading)
         content.addArrangedSubview(about)
 
-        NSLayoutConstraint.activate([
-            documentView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-            documentView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-            documentView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
-            documentView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
-            content.leadingAnchor.constraint(equalTo: documentView.leadingAnchor, constant: 28),
-            content.trailingAnchor.constraint(equalTo: documentView.trailingAnchor, constant: -28),
-            content.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 24),
-            content.bottomAnchor.constraint(equalTo: documentView.bottomAnchor, constant: -28),
-        ])
-
-        view = scrollView
+        view = makeSettingsScrollView(
+            hosting: content,
+            insets: NSEdgeInsets(top: 24, left: 28, bottom: 28, right: 28)
+        )
         refresh()
     }
 
