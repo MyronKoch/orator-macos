@@ -38,6 +38,17 @@ A showpiece is a flagship demo moment + design polish + distribution + engineeri
 ### Tier 0 — The Flagship
 - ~~**Reader window with karaoke follow-along highlighting**~~ **SHIPPED in v1.2.0**, upgraded past this spec: it live-follows any utterance from any entry point.
 
+### Tier 0.5 — What makes Orator *new* (not just useful)
+
+The features that change what the app *is* — "turns anything you can read into something worth listening to" — while staying firmly out of the voice-production lane (no cloning, no dictation). Ordered by novelty-per-effort. The first two reuse infrastructure we already shipped.
+
+- **Auto-casting** — stories read themselves in character. Detect quoted dialogue and its attribution, assign a consistent voice per speaker (narrator included), and read a passage like a radio drama. A **heuristic v1 needs no LLM** — it's dialogue detection + a deterministic speaker→voice map over the 26 stock voices, plus one additive engine method for per-segment voices. This is the "send it to a friend" feature. *(PRD 18.)*
+- **Subtitle/caption export** — narrate any selection to `.m4a` **and** a word-accurate `.srt` in one step. The word timestamps already exist (the Reader runs on them); writing them out is nearly free. Makes Orator a tool creators use to caption video. Cheapest genuine differentiator on the board.
+- **Focus mode (Reader)** — dim everything except the sentence being spoken. Per-sentence ranges + temporary attributes already exist; small lift, big demo impact, real accessibility/ADHD value.
+- **Read-along preset** — one click: slower speed + larger type + focus mode. Zero new tech; pure positioning. This is the literacy story — early readers, and the parents this app was built for.
+- **Private podcast** — export the queue as one chaptered audio file with short spoken transitions. "Turn your reading list into a podcast, privately." New framing over the existing queue + export.
+- **Skim mode** — reads the TL;DR, press a key to dive into the full text where you are. Audio skimming with drill-down doesn't exist anywhere. **Biggest lift** (depends on the Tier 2 local-LLM bet: ~1GB optional model, MLX generation, latency tuning) — sequence it last.
+
 ### Tier 1 — Design & UX polish
 - **Real Preferences window** (AppKit, tabbed: General / Voices / Pronunciations / Shortcuts / Advanced) instead of menu-bar-only settings. (The app is deliberately pure AppKit - no SwiftUI.)
 - **Unified visual redesign** of all windows (onboarding, pronunciation, per-app voices, recorder) into one design system.
