@@ -28,5 +28,36 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 Myron Koch. Open source, MIT licensed.</string>
+	<key>NSServices</key>
+	<array>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Speak with Orator</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>speakWithOrator</string>
+			<key>NSSendTypes</key>
+			<array>
+				<string>public.utf8-plain-text</string>
+				<string>NSStringPboardType</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Add to Orator Queue</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>addToOratorQueue</string>
+			<key>NSSendTypes</key>
+			<array>
+				<string>public.utf8-plain-text</string>
+				<string>NSStringPboardType</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>
