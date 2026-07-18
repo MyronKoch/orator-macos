@@ -32,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let defaults = UserDefaults.standard
     private let appProfiles = AppVoiceProfiles()
     private let history = ReadingHistory()
+    private let stats = ReadingStats()
     private var rememberHistory: Bool = {
         let defaults = UserDefaults.standard
         return defaults.object(forKey: "rememberHistory") == nil
@@ -323,8 +324,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func recordHistory(_ text: String) {
         guard rememberHistory else { return }
         history.add(text)
+        // Reading stats share the "remember my reading" switch. cast is false
+        // on this branch; it wires to the real auto-cast flag once that merges.
+        stats.record(
+            text: text,
+            sourceApp: lastReadApp?.name,
+            voiceName: engine?.currentVoice ?? "af_heart",
+            cast: false,
+            speed: engine?.speed ?? 1.0
+        )
         rebuildMenu()
     }
+
+    /// Snapshot of local reading stats for the Dashboard and the menu teaser.
+    var statsSnapshot: ReadingStatsSnapshot { stats.snapshot() }
+    var reading: ReadingStats { stats }
 
     /// Simulate Cmd+C, read the pasteboard, then restore the user's clipboard.
     private func captureSelectedText(completion: @escaping @MainActor (String?) -> Void) {
