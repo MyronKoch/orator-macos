@@ -1489,11 +1489,6 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .bezelBorder
-        scrollView.widthAnchor.constraint(
-            equalTo: content.widthAnchor,
-            constant: -(edgeInsets.left + edgeInsets.right)
-        ).isActive = true
-        scrollView.heightAnchor.constraint(equalToConstant: 240).isActive = true
 
         let addButton = NSButton(title: "Add App…", target: self, action: #selector(showAddAppMenu(_:)))
         addButton.bezelStyle = .rounded
@@ -1502,6 +1497,13 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         content.addArrangedSubview(body)
         content.addArrangedSubview(scrollView)
         content.addArrangedSubview(addButton)
+        NSLayoutConstraint.activate([
+            scrollView.widthAnchor.constraint(
+                equalTo: content.widthAnchor,
+                constant: -(edgeInsets.left + edgeInsets.right)
+            ),
+            scrollView.heightAnchor.constraint(equalToConstant: 240),
+        ])
 
         tableViews.append(tableView)
         addButtonTables[ObjectIdentifier(addButton)] = tableView
@@ -1772,11 +1774,6 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .bezelBorder
-        scrollView.widthAnchor.constraint(
-            equalTo: content.widthAnchor,
-            constant: -(edgeInsets.left + edgeInsets.right)
-        ).isActive = true
-        scrollView.heightAnchor.constraint(equalToConstant: 238).isActive = true
 
         let addButton = NSButton(title: "Add", target: self, action: #selector(addEntry(_:)))
         addButton.bezelStyle = .rounded
@@ -1795,6 +1792,13 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
         content.addArrangedSubview(body)
         content.addArrangedSubview(scrollView)
         content.addArrangedSubview(buttons)
+        NSLayoutConstraint.activate([
+            scrollView.widthAnchor.constraint(
+                equalTo: content.widthAnchor,
+                constant: -(edgeInsets.left + edgeInsets.right)
+            ),
+            scrollView.heightAnchor.constraint(equalToConstant: 238),
+        ])
 
         viewControls.append(ViewControls(tableView: tableView, removeButton: removeButton))
         buttonTables[ObjectIdentifier(addButton)] = tableView
