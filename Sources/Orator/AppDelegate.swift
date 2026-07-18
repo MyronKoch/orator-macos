@@ -62,10 +62,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Launch
 
+    private var serviceProvider: OratorServiceProvider?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
         setupStatusItem()
         loadEngineAsync()
+        registerServices()
 
         if AXIsProcessTrusted() {
             installKeyMonitor()
@@ -591,6 +594,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         if engine != nil {
+            // Open Reader is the flagship entry point - promote it to the very
+            // top, larger and bolder, with the reader glyph, set apart by its
+            // own separator.
+            let openReader = NSMenuItem(title: "Open Reader…", action: #selector(openReader), keyEquivalent: "")
+            openReader.target = self
+            openReader.image = NSImage(systemSymbolName: "book.pages", accessibilityDescription: nil)
+            openReader.attributedTitle = NSAttributedString(
+                string: "Open Reader…",
+                attributes: [.font: NSFont.systemFont(ofSize: 15, weight: .semibold)]
+            )
+            menu.addItem(openReader)
+            menu.addItem(.separator())
+
             let readFile = NSMenuItem(
                 title: "Read File…",
                 action: #selector(readFile),
@@ -606,10 +622,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             speakClipboard.target = self
             menu.addItem(speakClipboard)
-
-            let openReader = NSMenuItem(title: "Open Reader…", action: #selector(openReader), keyEquivalent: "")
-            openReader.target = self
-            menu.addItem(openReader)
 
             let pauseActionTitle = engine?.isPaused == true ? "Resume Speaking" : "Pause Speaking"
             let pauseTitle = "\(pauseActionTitle) (\(hotkeyDisplay(for: .pause)))"
@@ -651,9 +663,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             queueCount.isEnabled = false
             queueMenu.addItem(queueCount)
 
-            for text in readingQueue {
-                let item = NSMenuItem(title: queueItemTitle(for: text), action: nil, keyEquivalent: "")
-                item.isEnabled = false
+            for (index, text) in readingQueue.enumerated() {
+                // Clicking a queued item removes it. The ✕ + tooltip make the
+                // "click to remove" affordance discoverable.
+                let item = NSMenuItem(
+                    title: "✕  \(queueItemTitle(for: text))",
+                    action: #selector(removeQueueItem(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = index
+                item.toolTip = "Remove this item from the queue"
                 queueMenu.addItem(item)
             }
 
@@ -966,6 +986,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         readingQueue.removeAll()
         rebuildMenu()
     }
+
+    @objc private func removeQueueItem(_ sender: NSMenuItem) {
+        guard let index = sender.representedObject as? Int,
+              readingQueue.indices.contains(index) else { return }
+        readingQueue.remove(at: index)
+        rebuildMenu()
+    }
+
+    // MARK: - macOS Services (right-click on a selection)
+
+    /// Register the services provider so the Info.plist NSServices entries
+    /// resolve to real handlers, then refresh the system's dynamic services so
+    /// they show up without a re-login.
+    private func registerServices() {
+        let provider = OratorServiceProvider()
+        NSApp.servicesProvider = provider
+        serviceProvider = provider
+        NSUpdateDynamicServices()
+    }
+
+    /// Speak text handed over by the "Speak with Orator" Service.
+    func serviceSpeak(_ text: String) { speakText(text) }
+
+    /// Queue text handed over by the "Add to Orator Queue" Service.
+    func serviceQueue(_ text: String) { addToReadingQueue(text) }
 
     @objc private func speakClipboardText() {
         speakClipboard()
