@@ -432,20 +432,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         catch { oratorLog("history speak FAILED: \(error.localizedDescription)") }
     }
 
-    func pronunciationsContentView() -> NSView {
+    func makePronunciationsContentView() -> NSView {
         if pronunciationsEditor == nil {
             pronunciationsEditor = PronunciationsEditor(pronunciations: .shared)
         }
-        return pronunciationsEditor!.embeddedContentView()
+        return pronunciationsEditor!.makeContentView()
     }
 
     func refreshPronunciationsEditor() {
         pronunciationsEditor?.reload()
     }
 
-    func shortcutsContentView() -> NSView {
+    func makeShortcutsContentView() -> NSView {
         ensureHotkeyRecorder()
-        return hotkeyRecorderWindowController!.embeddedContentView()
+        return hotkeyRecorderWindowController!.makeContentView()
     }
 
     func refreshShortcutsEditor() {
@@ -456,10 +456,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyRecorderWindowController?.stopRecording()
     }
 
-    func appVoiceProfilesContentView() -> NSView {
+    func makeAppVoiceProfilesContentView() -> NSView {
         ensureAppVoiceProfilesEditor()
         appVoiceProfilesEditor?.updateVoiceNames(availableVoiceNames)
-        return appVoiceProfilesEditor!.embeddedContentView()
+        return appVoiceProfilesEditor!.makeContentView()
     }
 
     func refreshAppVoiceProfilesEditor() {
@@ -1370,8 +1370,9 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
     private let onPreview: (_ voiceName: String, _ speed: Float) -> Void
     private let onChange: @MainActor () -> Void
     private let window: NSWindow
-    private let tableView = NSTableView()
-    private var rootContentView: NSView!
+    private var tableViews: [NSTableView] = []
+    private var addButtonTables: [ObjectIdentifier: NSTableView] = [:]
+    private weak var pendingSelectionTableView: NSTableView?
     private var rows: [(bundleID: String, profile: Profile)]
 
     init(
@@ -1399,19 +1400,8 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
 
     func show() {
         reload()
-        if let rootContentView, window.contentView !== rootContentView {
-            window.contentView = rootContentView
-        }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-    }
-
-    func embeddedContentView() -> NSView {
-        reload()
-        if window.contentView === rootContentView {
-            window.contentView = NSView()
-        }
-        return rootContentView
     }
 
     func updateVoiceNames(_ names: [String]) {
@@ -1420,19 +1410,30 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
 
     func reload() {
         rows = profiles.all
-        tableView.reloadData()
+        for tableView in tableViews {
+            tableView.reloadData()
+        }
     }
 
     private func configureWindow() {
         window.title = "Per-App Voices"
         window.center()
         window.isReleasedWhenClosed = false
+        window.contentView = makeContentView(
+            edgeInsets: NSEdgeInsets(top: 22, left: 24, bottom: 22, right: 24)
+        )
+    }
 
+    /// Creates a distinct control hierarchy for each host. The editor remains
+    /// the shared store-backed data source for every table it vends.
+    func makeContentView(
+        edgeInsets: NSEdgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+    ) -> NSView {
         let content = NSStackView()
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 12
-        content.edgeInsets = NSEdgeInsets(top: 22, left: 24, bottom: 22, right: 24)
+        content.edgeInsets = edgeInsets
 
         let heading = NSTextField(labelWithString: "Per-App Voices")
         heading.font = .systemFont(ofSize: 20, weight: .semibold)
@@ -1469,6 +1470,7 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         removeColumn.width = 76
         removeColumn.minWidth = 70
 
+        let tableView = NSTableView()
         tableView.addTableColumn(appColumn)
         tableView.addTableColumn(voiceColumn)
         tableView.addTableColumn(speedColumn)
@@ -1487,7 +1489,10 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .bezelBorder
-        scrollView.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -48).isActive = true
+        scrollView.widthAnchor.constraint(
+            equalTo: content.widthAnchor,
+            constant: -(edgeInsets.left + edgeInsets.right)
+        ).isActive = true
         scrollView.heightAnchor.constraint(equalToConstant: 240).isActive = true
 
         let addButton = NSButton(title: "Add App…", target: self, action: #selector(showAddAppMenu(_:)))
@@ -1498,8 +1503,9 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         content.addArrangedSubview(scrollView)
         content.addArrangedSubview(addButton)
 
-        rootContentView = content
-        window.contentView = content
+        tableViews.append(tableView)
+        addButtonTables[ObjectIdentifier(addButton)] = tableView
+        return content
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -1572,6 +1578,7 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
     }
 
     @objc private func showAddAppMenu(_ sender: NSButton) {
+        pendingSelectionTableView = addButtonTables[ObjectIdentifier(sender)]
         let existingBundleIDs = Set(rows.map { $0.bundleID })
         let ownBundleID = Bundle.main.bundleIdentifier
         var seenBundleIDs = existingBundleIDs
@@ -1612,9 +1619,13 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         )
         reload()
         if let row = rows.firstIndex(where: { $0.bundleID == bundleID }) {
-            tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            tableView.scrollRowToVisible(row)
+            pendingSelectionTableView?.selectRowIndexes(
+                IndexSet(integer: row),
+                byExtendingSelection: false
+            )
+            pendingSelectionTableView?.scrollRowToVisible(row)
         }
+        pendingSelectionTableView = nil
         onChange()
     }
 
@@ -1670,11 +1681,15 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
         static let respelling = NSUserInterfaceItemIdentifier("pronunciationRespelling")
     }
 
+    private struct ViewControls {
+        let tableView: NSTableView
+        let removeButton: NSButton
+    }
+
     private let pronunciations: Pronunciations
     private let window: NSWindow
-    private let tableView = NSTableView()
-    private var rootContentView: NSView!
-    private var removeButton: NSButton!
+    private var viewControls: [ViewControls] = []
+    private var buttonTables: [ObjectIdentifier: NSTableView] = [:]
     private var rows: [(key: String, value: String)]
 
     init(pronunciations: Pronunciations) {
@@ -1692,37 +1707,34 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
 
     func show() {
         reload()
-        if let rootContentView, window.contentView !== rootContentView {
-            window.contentView = rootContentView
-        }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func embeddedContentView() -> NSView {
-        reload()
-        if window.contentView === rootContentView {
-            window.contentView = NSView()
-        }
-        return rootContentView
-    }
-
     func reload() {
         rows = pronunciations.entries
-        tableView.reloadData()
-        updateRemoveButton()
+        reloadTables()
     }
 
     private func configureWindow() {
         window.title = "Pronunciations"
         window.center()
         window.isReleasedWhenClosed = false
+        window.contentView = makeContentView(
+            edgeInsets: NSEdgeInsets(top: 22, left: 24, bottom: 22, right: 24)
+        )
+    }
 
+    /// Builds fresh controls for a window or tab while keeping all tables
+    /// synchronized through Pronunciations.shared.
+    func makeContentView(
+        edgeInsets: NSEdgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+    ) -> NSView {
         let content = NSStackView()
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 12
-        content.edgeInsets = NSEdgeInsets(top: 22, left: 24, bottom: 22, right: 24)
+        content.edgeInsets = edgeInsets
 
         let heading = NSTextField(labelWithString: "Pronunciation Dictionary")
         heading.font = .systemFont(ofSize: 20, weight: .semibold)
@@ -1744,6 +1756,7 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
         respellingColumn.width = 256
         respellingColumn.minWidth = 160
 
+        let tableView = NSTableView()
         tableView.addTableColumn(wordColumn)
         tableView.addTableColumn(respellingColumn)
         tableView.dataSource = self
@@ -1759,12 +1772,19 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .bezelBorder
-        scrollView.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -48).isActive = true
+        scrollView.widthAnchor.constraint(
+            equalTo: content.widthAnchor,
+            constant: -(edgeInsets.left + edgeInsets.right)
+        ).isActive = true
         scrollView.heightAnchor.constraint(equalToConstant: 238).isActive = true
 
-        let addButton = NSButton(title: "Add", target: self, action: #selector(addEntry))
+        let addButton = NSButton(title: "Add", target: self, action: #selector(addEntry(_:)))
         addButton.bezelStyle = .rounded
-        removeButton = NSButton(title: "Remove", target: self, action: #selector(removeEntry))
+        let removeButton = NSButton(
+            title: "Remove",
+            target: self,
+            action: #selector(removeEntry(_:))
+        )
         removeButton.bezelStyle = .rounded
 
         let buttons = NSStackView(views: [addButton, removeButton])
@@ -1776,22 +1796,27 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
         content.addArrangedSubview(scrollView)
         content.addArrangedSubview(buttons)
 
-        rootContentView = content
-        window.contentView = content
-        updateRemoveButton()
+        viewControls.append(ViewControls(tableView: tableView, removeButton: removeButton))
+        buttonTables[ObjectIdentifier(addButton)] = tableView
+        buttonTables[ObjectIdentifier(removeButton)] = tableView
+        updateRemoveButtons()
+        return content
     }
 
-    @objc private func addEntry() {
+    @objc private func addEntry(_ sender: NSButton) {
+        guard let tableView = buttonTables[ObjectIdentifier(sender)] else { return }
         rows.append((key: "", value: ""))
-        tableView.reloadData()
+        reloadTables()
 
         let row = rows.count - 1
         tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         tableView.scrollRowToVisible(row)
         tableView.editColumn(0, row: row, with: nil, select: true)
+        updateRemoveButtons()
     }
 
-    @objc private func removeEntry() {
+    @objc private func removeEntry(_ sender: NSButton) {
+        guard let tableView = buttonTables[ObjectIdentifier(sender)] else { return }
         let row = tableView.selectedRow
         guard rows.indices.contains(row) else { return }
 
@@ -1800,13 +1825,13 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
             pronunciations.remove(key: key)
         }
         rows.remove(at: row)
-        tableView.reloadData()
+        reloadTables()
 
         if !rows.isEmpty {
             let nextRow = min(row, rows.count - 1)
             tableView.selectRowIndexes(IndexSet(integer: nextRow), byExtendingSelection: false)
         }
-        updateRemoveButton()
+        updateRemoveButtons()
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -1841,11 +1866,12 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        updateRemoveButton()
+        updateRemoveButtons()
     }
 
     func controlTextDidEndEditing(_ obj: Notification) {
-        guard let field = obj.object as? NSTextField else { return }
+        guard let field = obj.object as? NSTextField,
+              let tableView = containingTableView(for: field) else { return }
         let row = tableView.row(for: field)
         let column = tableView.column(for: field)
         guard rows.indices.contains(row), tableView.tableColumns.indices.contains(column) else { return }
@@ -1872,9 +1898,31 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
         } else {
             pronunciations.add(key: newKey, value: rows[row].value)
         }
+
+        reloadTables(excluding: tableView)
     }
 
-    private func updateRemoveButton() {
-        removeButton?.isEnabled = tableView.selectedRow >= 0
+    private func reloadTables(excluding excludedTableView: NSTableView? = nil) {
+        for controls in viewControls where controls.tableView !== excludedTableView {
+            controls.tableView.reloadData()
+        }
+        updateRemoveButtons()
+    }
+
+    private func updateRemoveButtons() {
+        for controls in viewControls {
+            controls.removeButton.isEnabled = controls.tableView.selectedRow >= 0
+        }
+    }
+
+    private func containingTableView(for view: NSView) -> NSTableView? {
+        var ancestor: NSView? = view
+        while let current = ancestor {
+            if let tableView = current as? NSTableView {
+                return tableView
+            }
+            ancestor = current.superview
+        }
+        return nil
     }
 }

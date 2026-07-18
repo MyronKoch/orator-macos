@@ -33,10 +33,9 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
     private let onBindingChanged: @MainActor () -> Void
     private var hotkeyManager: HotkeyManager?
     private var chords: [HotkeyAction: Chord] = [:]
-    private var rows: [HotkeyAction: RowControls] = [:]
+    private var rowSets: [[HotkeyAction: RowControls]] = []
     private var recordingAction: HotkeyAction?
     private var localMonitor: Any?
-    private var rootContentView: NSView!
 
     init(
         hotkeyManager: HotkeyManager?,
@@ -68,22 +67,8 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
 
     func show() {
         refreshRows()
-        if let rootContentView, window?.contentView !== rootContentView {
-            window?.contentView = rootContentView
-        }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-    }
-
-    /// Vends the recorder's existing controls for the Shortcuts tab. The
-    /// standalone window remains available, but the controls have one owner at
-    /// a time so recorder state and conflict handling are never duplicated.
-    func embeddedContentView() -> NSView {
-        refreshRows()
-        if window?.contentView === rootContentView {
-            window?.contentView = NSView()
-        }
-        return rootContentView
     }
 
     func refresh() {
@@ -120,12 +105,21 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
         window.center()
         window.isReleasedWhenClosed = false
         window.delegate = self
+        window.contentView = makeContentView(
+            edgeInsets: NSEdgeInsets(top: 22, left: 24, bottom: 22, right: 24)
+        )
+    }
 
+    /// Creates a new recorder hierarchy for each host. All hierarchies share
+    /// one recording session and the same HotkeyManager/defaults bindings.
+    func makeContentView(
+        edgeInsets: NSEdgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+    ) -> NSView {
         let content = NSStackView()
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 12
-        content.edgeInsets = NSEdgeInsets(top: 22, left: 24, bottom: 22, right: 24)
+        content.edgeInsets = edgeInsets
 
         let heading = NSTextField(labelWithString: "Keyboard Shortcuts")
         heading.font = .systemFont(ofSize: 20, weight: .semibold)
@@ -140,6 +134,7 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
         content.addArrangedSubview(heading)
         content.addArrangedSubview(helper)
 
+        var rows: [HotkeyAction: RowControls] = [:]
         for action in HotkeyAction.allCases {
             let nameLabel = NSTextField(labelWithString: Self.rowTitle(for: action))
             nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
@@ -190,8 +185,9 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
             )
         }
 
-        rootContentView = content
-        window.contentView = content
+        rowSets.append(rows)
+        refreshRows()
+        return content
     }
 
     @objc private func beginRecording(_ sender: NSButton) {
@@ -200,9 +196,11 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
         clearAllFeedback()
         recordingAction = action
 
-        for (rowAction, row) in rows {
-            row.recordButton.isEnabled = false
-            row.recordButton.title = rowAction == action ? "Recording…" : "Record"
+        for rows in rowSets {
+            for (rowAction, row) in rows {
+                row.recordButton.isEnabled = false
+                row.recordButton.title = rowAction == action ? "Recording…" : "Record"
+            }
         }
         setFeedback("Press a shortcut, or Escape to cancel.", for: action, isError: false)
 
@@ -340,16 +338,18 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
     }
 
     private func refreshRows() {
-        for action in HotkeyAction.allCases {
-            guard let row = rows[action] else { continue }
-            if let binding = currentBinding(for: action) {
-                row.chordLabel.stringValue = displayForCurrentBinding(
-                    action: action,
-                    keyCode: binding.keyCode,
-                    modifiers: binding.modifiers
-                )
-            } else {
-                row.chordLabel.stringValue = "Not set"
+        for rows in rowSets {
+            for action in HotkeyAction.allCases {
+                guard let row = rows[action] else { continue }
+                if let binding = currentBinding(for: action) {
+                    row.chordLabel.stringValue = displayForCurrentBinding(
+                        action: action,
+                        keyCode: binding.keyCode,
+                        modifiers: binding.modifiers
+                    )
+                } else {
+                    row.chordLabel.stringValue = "Not set"
+                }
             }
         }
     }
@@ -377,9 +377,11 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
             self.localMonitor = nil
         }
         recordingAction = nil
-        for row in rows.values {
-            row.recordButton.title = "Record"
-            row.recordButton.isEnabled = true
+        for rows in rowSets {
+            for row in rows.values {
+                row.recordButton.title = "Record"
+                row.recordButton.isEnabled = true
+            }
         }
     }
 
@@ -390,16 +392,20 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
     }
 
     private func clearFeedback(for action: HotkeyAction) {
-        guard let label = rows[action]?.feedbackLabel else { return }
-        label.stringValue = ""
-        label.isHidden = true
+        for rows in rowSets {
+            guard let label = rows[action]?.feedbackLabel else { continue }
+            label.stringValue = ""
+            label.isHidden = true
+        }
     }
 
     private func setFeedback(_ message: String, for action: HotkeyAction, isError: Bool) {
-        guard let label = rows[action]?.feedbackLabel else { return }
-        label.stringValue = message
-        label.textColor = isError ? .systemRed : .secondaryLabelColor
-        label.isHidden = false
+        for rows in rowSets {
+            guard let label = rows[action]?.feedbackLabel else { continue }
+            label.stringValue = message
+            label.textColor = isError ? .systemRed : .secondaryLabelColor
+            label.isHidden = false
+        }
     }
 
     private func action(for button: NSButton) -> HotkeyAction? {
