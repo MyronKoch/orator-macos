@@ -36,6 +36,7 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
     private var rows: [HotkeyAction: RowControls] = [:]
     private var recordingAction: HotkeyAction?
     private var localMonitor: Any?
+    private var rootContentView: NSView!
 
     init(
         hotkeyManager: HotkeyManager?,
@@ -67,8 +68,26 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
 
     func show() {
         refreshRows()
+        if let rootContentView, window?.contentView !== rootContentView {
+            window?.contentView = rootContentView
+        }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Vends the recorder's existing controls for the Shortcuts tab. The
+    /// standalone window remains available, but the controls have one owner at
+    /// a time so recorder state and conflict handling are never duplicated.
+    func embeddedContentView() -> NSView {
+        refreshRows()
+        if window?.contentView === rootContentView {
+            window?.contentView = NSView()
+        }
+        return rootContentView
+    }
+
+    func refresh() {
+        refreshRows()
     }
 
     /// The manager may be installed after the window is created, once the
@@ -171,6 +190,7 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
             )
         }
 
+        rootContentView = content
         window.contentView = content
     }
 
@@ -351,7 +371,7 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
         return Self.modifierDisplay(modifiers) + String(keyCode)
     }
 
-    private func stopRecording() {
+    func stopRecording() {
         if let localMonitor {
             NSEvent.removeMonitor(localMonitor)
             self.localMonitor = nil
