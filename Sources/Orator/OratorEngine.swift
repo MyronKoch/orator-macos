@@ -253,25 +253,54 @@ final class OratorEngine: @unchecked Sendable {
         try speak(chunks: TextChunker.chunk(text))
     }
 
-    /// Speak pre-chunked text. The Reader window chunks its document once and
-    /// restarts mid-list for click-to-jump, so chunk boundaries stay stable
-    /// across seeks. Returns the utterance ID that tags this utterance's
-    /// `ChunkTiming` callbacks, or -1 if there was nothing to say.
+    /// One synthesis unit: text plus the exact voice/language to render it in.
+    private struct VoicedChunk {
+        let text: String
+        let voice: MLXArray
+        let language: Language
+    }
+
+    /// Speak pre-chunked text in the current voice. The Reader window chunks its
+    /// document once and restarts mid-list for click-to-jump, so chunk
+    /// boundaries stay stable across seeks. Returns the utterance ID that tags
+    /// this utterance's `ChunkTiming` callbacks, or -1 if nothing to say.
     @discardableResult
     func speak(chunks: [String]) throws -> Int {
         guard !chunks.isEmpty else { return -1 }
 
-        // Voice keys may carry zero, one, or two ".npy" suffixes depending on
-        // how the NPZ was authored - try all spellings.
-        guard let voiceEmbedding = voices[currentVoice + ".npy"]
-            ?? voices[currentVoice]
-            ?? voices[currentVoice + ".npy.npy"] else {
+        guard let voiceEmbedding = embedding(for: currentVoice) else {
             oratorLog("speak: lookup failed for \(currentVoice); available: \(Array(voices.keys.sorted().prefix(4)))")
             throw OratorError.voiceNotFound(currentVoice)
         }
         let language: Language = currentVoice.hasPrefix("b") ? .enGB : .enUS
-        let speed = self.speed
+        let items = chunks.map { VoicedChunk(text: $0, voice: voiceEmbedding, language: language) }
+        return try play(items)
+    }
 
+    /// Speak a cast list: each segment carries its own voice. The segment text
+    /// is chunked internally (keeping the segment's voice) so long narration
+    /// still starts fast. A segment whose voice can't be resolved falls back to
+    /// the current voice rather than aborting the whole passage. Returns the
+    /// utterance ID, or -1 if there was nothing to say.
+    @discardableResult
+    func speak(segments: [SpeechSegment]) throws -> Int {
+        let fallback = embedding(for: currentVoice)
+        var items: [VoicedChunk] = []
+        for segment in segments {
+            guard let voice = embedding(for: segment.voiceName) ?? fallback else { continue }
+            let language: Language = segment.voiceName.hasPrefix("b") ? .enGB : .enUS
+            for chunk in TextChunker.chunk(segment.text) {
+                items.append(VoicedChunk(text: chunk, voice: voice, language: language))
+            }
+        }
+        guard !items.isEmpty else { return -1 }
+        return try play(items)
+    }
+
+    /// The guarded playback core. ALL speech routes through here so the
+    /// generation/lock/scheduledBuffers/synthesisDone/speaking state machine
+    /// lives in exactly one place, whatever the voice mix.
+    private func play(_ items: [VoicedChunk]) throws -> Int {
         // Cancel anything in flight and reset playback state.
         lock.lock()
         generation += 1
@@ -289,18 +318,19 @@ final class OratorEngine: @unchecked Sendable {
         player.play()
         NotificationCenter.default.post(name: .oratorSpeechStarted, object: nil)
 
+        let speed = self.speed
         synthQueue.async { [self] in
             var offset: TimeInterval = 0
-            for (chunkIndex, chunk) in chunks.enumerated() {
+            for (chunkIndex, item) in items.enumerated() {
                 if isCancelled(gen) { return }
                 guard let (samples, tokens) = try? tts.generateAudio(
-                    voice: voiceEmbedding, language: language, text: chunk, speed: speed
+                    voice: item.voice, language: item.language, text: item.text, speed: speed
                 ), !samples.isEmpty else { continue }
                 if isCancelled(gen) { return }
                 schedule(samples: samples, generation: gen)
                 offset += emitChunkTiming(
-                    tokens, chunkText: chunk, chunkIndex: chunkIndex,
-                    chunkCount: chunks.count, offset: offset,
+                    tokens, chunkText: item.text, chunkIndex: chunkIndex,
+                    chunkCount: items.count, offset: offset,
                     sampleCount: samples.count, generation: gen
                 )
             }
