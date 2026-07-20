@@ -1,6 +1,6 @@
 import Cocoa
 
-/// Records and resets the three global keyboard shortcuts exposed by Orator.
+/// Records and resets the global keyboard shortcuts exposed by Orator.
 /// The controller owns its local event monitor so closing or cancelling the
 /// window cannot leave a recorder active.
 @MainActor
@@ -222,13 +222,17 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
         defaults.removeObject(forKey: keys.modifiers)
         defaults.removeObject(forKey: keys.display)
 
-        let chord = Self.defaultChord(for: action)
-        chords[action] = chord
-        hotkeyManager?.reconfigure(
-            action,
-            keyCode: chord.keyCode,
-            modifiers: chord.modifiers
-        )
+        if let chord = Self.defaultChord(for: action) {
+            chords[action] = chord
+            hotkeyManager?.reconfigure(
+                action,
+                keyCode: chord.keyCode,
+                modifiers: chord.modifiers
+            )
+        } else {
+            chords.removeValue(forKey: action)
+            hotkeyManager?.reconfigure(action, keyCode: nil, modifiers: [.option])
+        }
         refreshRows()
         onBindingChanged()
     }
@@ -318,7 +322,11 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
 
     private func loadChords() {
         for action in HotkeyAction.allCases {
-            chords[action] = persistedChord(for: action) ?? Self.defaultChord(for: action)
+            if let chord = persistedChord(for: action) ?? Self.defaultChord(for: action) {
+                chords[action] = chord
+            } else {
+                chords.removeValue(forKey: action)
+            }
         }
     }
 
@@ -347,8 +355,10 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
                         keyCode: binding.keyCode,
                         modifiers: binding.modifiers
                     )
+                    row.chordLabel.textColor = .labelColor
                 } else {
                     row.chordLabel.stringValue = "Not set"
+                    row.chordLabel.textColor = .secondaryLabelColor
                 }
             }
         }
@@ -364,8 +374,8 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
            chord.modifiers == modifiers {
             return chord.display
         }
-        let defaultChord = Self.defaultChord(for: action)
-        if defaultChord.keyCode == keyCode, defaultChord.modifiers == modifiers {
+        if let defaultChord = Self.defaultChord(for: action),
+           defaultChord.keyCode == keyCode, defaultChord.modifiers == modifiers {
             return defaultChord.display
         }
         return Self.modifierDisplay(modifiers) + String(keyCode)
@@ -417,10 +427,10 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
     }
 
     static func defaultDisplay(for action: HotkeyAction) -> String {
-        defaultChord(for: action).display
+        defaultChord(for: action)?.display ?? "Not set"
     }
 
-    private static func defaultChord(for action: HotkeyAction) -> Chord {
+    private static func defaultChord(for action: HotkeyAction) -> Chord? {
         switch action {
         case .speak:
             return Chord(keyCode: 39, modifiers: [.option], display: "⌥'")
@@ -428,6 +438,8 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
             return Chord(keyCode: 35, modifiers: [.option], display: "⌥P")
         case .queue:
             return Chord(keyCode: 12, modifiers: [.option], display: "⌥Q")
+        case .dramatize:
+            return nil
         }
     }
 
@@ -436,6 +448,7 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
         case .speak: return "Speak selection"
         case .pause: return "Pause / Resume"
         case .queue: return "Add selection to Queue"
+        case .dramatize: return "Dramatize dialogue"
         }
     }
 
@@ -444,6 +457,7 @@ final class HotkeyRecorderWindowController: NSWindowController, NSWindowDelegate
         case .speak: return "Speak"
         case .pause: return "Pause / Resume"
         case .queue: return "Queue"
+        case .dramatize: return "Dramatize"
         }
     }
 

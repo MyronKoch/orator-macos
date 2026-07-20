@@ -388,6 +388,12 @@ private final class VoicesSettingsViewController: NSViewController {
     private unowned let appDelegate: AppDelegate
     private let voicePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let speedPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let autoCastCheckbox = NSButton(
+        checkboxWithTitle: "Dramatize dialogue", target: nil, action: nil
+    )
+    // nonisolated(unsafe): the deinit (nonisolated) removes this observer, and
+    // NotificationCenter.removeObserver is thread-safe, so unchecked access is fine.
+    private nonisolated(unsafe) var autoCastObserver: NSObjectProtocol?
 
     init(appDelegate: AppDelegate) {
         self.appDelegate = appDelegate
@@ -396,6 +402,12 @@ private final class VoicesSettingsViewController: NSViewController {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        if let autoCastObserver {
+            NotificationCenter.default.removeObserver(autoCastObserver)
+        }
     }
 
     override func loadView() {
@@ -412,6 +424,18 @@ private final class VoicesSettingsViewController: NSViewController {
         )
         helper.font = .systemFont(ofSize: 13)
         helper.textColor = .secondaryLabelColor
+
+        autoCastCheckbox.target = self
+        autoCastCheckbox.action = #selector(toggleAutoCast(_:))
+        let autoCastHelp = NSTextField(
+            wrappingLabelWithString: "Quoted speech is read by a different voice per speaker. Off by default."
+        )
+        autoCastHelp.font = .systemFont(ofSize: 11)
+        autoCastHelp.textColor = .secondaryLabelColor
+        let autoCastControls = NSStackView(views: [autoCastCheckbox, autoCastHelp])
+        autoCastControls.orientation = .vertical
+        autoCastControls.alignment = .leading
+        autoCastControls.spacing = 3
 
         let voiceLabel = settingLabel("Voice")
         voicePopup.target = self
@@ -460,6 +484,8 @@ private final class VoicesSettingsViewController: NSViewController {
         stack.addArrangedSubview(heading)
         stack.addArrangedSubview(helper)
         stack.setCustomSpacing(20, after: helper)
+        stack.addArrangedSubview(autoCastControls)
+        autoCastHelp.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         stack.addArrangedSubview(globalBox)
         let perApp = appDelegate.makeAppVoiceProfilesContentView()
         perApp.translatesAutoresizingMaskIntoConstraints = false
@@ -471,6 +497,13 @@ private final class VoicesSettingsViewController: NSViewController {
             hosting: stack,
             insets: NSEdgeInsets(top: 24, left: 26, bottom: 28, right: 26)
         )
+        autoCastObserver = NotificationCenter.default.addObserver(
+            forName: .oratorAutoCastChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.syncAutoCastState()
+            }
+        }
         refresh()
     }
 
@@ -478,7 +511,12 @@ private final class VoicesSettingsViewController: NSViewController {
         guard isViewLoaded else { return }
         rebuildVoiceMenu()
         rebuildSpeedMenu()
+        syncAutoCastState()
         appDelegate.refreshAppVoiceProfilesEditor()
+    }
+
+    private func syncAutoCastState() {
+        autoCastCheckbox.state = appDelegate.autoCastEnabled ? .on : .off
     }
 
     private func rebuildVoiceMenu() {
@@ -566,6 +604,10 @@ private final class VoicesSettingsViewController: NSViewController {
         guard let speed = sender.selectedItem?.representedObject as? Float else { return }
         appDelegate.setSelectedSpeed(speed)
         refresh()
+    }
+
+    @objc private func toggleAutoCast(_ sender: NSButton) {
+        appDelegate.setAutoCast(sender.state == .on)
     }
 
     @objc private func previewVoice() {
