@@ -394,6 +394,8 @@ private final class VoicesSettingsViewController: NSViewController {
     // nonisolated(unsafe): the deinit (nonisolated) removes this observer, and
     // NotificationCenter.removeObserver is thread-safe, so unchecked access is fine.
     private nonisolated(unsafe) var autoCastObserver: NSObjectProtocol?
+    // Same rationale: removed in deinit; NSEvent.removeMonitor is thread-safe.
+    private nonisolated(unsafe) var voiceKeyMonitor: Any?
 
     init(appDelegate: AppDelegate) {
         self.appDelegate = appDelegate
@@ -407,6 +409,9 @@ private final class VoicesSettingsViewController: NSViewController {
     deinit {
         if let autoCastObserver {
             NotificationCenter.default.removeObserver(autoCastObserver)
+        }
+        if let voiceKeyMonitor {
+            NSEvent.removeMonitor(voiceKeyMonitor)
         }
     }
 
@@ -487,6 +492,12 @@ private final class VoicesSettingsViewController: NSViewController {
         stack.addArrangedSubview(autoCastControls)
         autoCastHelp.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         stack.addArrangedSubview(globalBox)
+        let auditionHint = NSTextField(
+            wrappingLabelWithString: "Tip: press [ or ] to step through voices and hear each one instantly."
+        )
+        auditionHint.font = .systemFont(ofSize: 11)
+        auditionHint.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(auditionHint)
         let perApp = appDelegate.makeAppVoiceProfilesContentView()
         perApp.translatesAutoresizingMaskIntoConstraints = false
         stack.addArrangedSubview(perApp)
@@ -504,7 +515,55 @@ private final class VoicesSettingsViewController: NSViewController {
                 self?.syncAutoCastState()
             }
         }
+        // Audition voices from the keyboard: [ = previous, ] = next, each auto-previews.
+        // Local monitors deliver on the main thread; scoped below to when this tab is showing.
+        voiceKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            // Extract Sendable primitives here; never move the non-Sendable NSEvent
+            // across the MainActor boundary. Local monitors deliver on the main thread.
+            let characters = event.charactersIgnoringModifiers
+            let modifiers = event.modifierFlags
+            let handled = MainActor.assumeIsolated {
+                self.handleVoiceKey(characters: characters, modifiers: modifiers)
+            }
+            return handled ? nil : event
+        }
         refresh()
+    }
+
+    /// [ / ] step through the voice list and auto-preview, but only while the Voices
+    /// tab is actually on screen (display(_:) removes off-screen tabs, so voicePopup.window
+    /// is nil for other tabs) and not while editing text. Returns true if it consumed the key.
+    private func handleVoiceKey(characters: String?, modifiers: NSEvent.ModifierFlags) -> Bool {
+        guard let window = voicePopup.window, window.isKeyWindow, voicePopup.isEnabled else { return false }
+        if let editor = window.firstResponder as? NSText, editor.isFieldEditor { return false }
+        guard modifiers.intersection(.deviceIndependentFlagsMask).isEmpty else { return false }
+        switch characters {
+        case "]": stepVoice(1); return true
+        case "[": stepVoice(-1); return true
+        default: return false
+        }
+    }
+
+    /// Move the voice selection by `direction` (skipping group headers/separators),
+    /// commit it, and preview it. Wraps around the ends for fast auditioning.
+    private func stepVoice(_ direction: Int) {
+        guard let items = voicePopup.menu?.items else { return }
+        let voiceIndices = items.indices.filter { (items[$0].representedObject as? String) != nil }
+        guard !voiceIndices.isEmpty else { return }
+        let current = voicePopup.indexOfSelectedItem
+        let pos = voiceIndices.firstIndex(of: current)
+        let nextPos: Int
+        if let pos {
+            nextPos = (pos + direction + voiceIndices.count) % voiceIndices.count
+        } else {
+            nextPos = direction > 0 ? 0 : voiceIndices.count - 1
+        }
+        let targetIndex = voiceIndices[nextPos]
+        guard let voice = items[targetIndex].representedObject as? String else { return }
+        voicePopup.selectItem(at: targetIndex)
+        appDelegate.setSelectedVoice(voice)
+        appDelegate.previewVoice(voice, speed: appDelegate.selectedSpeed)
     }
 
     func refresh() {
