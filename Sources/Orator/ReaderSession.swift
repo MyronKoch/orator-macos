@@ -124,7 +124,7 @@ final class ReaderSession {
         let index = min(max(requestedIndex, 0), chunks.count - 1)
 
         do {
-            try timeline.speak(chunks: chunks, from: index)
+            try timeline.replay(fromChunk: index, fallbackChunks: chunks)
         } catch {
             transitionToIdle(clearCurrentChunk: false, resetPosition: true)
             oratorLog("reader speak FAILED: \(error.localizedDescription)")

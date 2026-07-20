@@ -43,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private enum Pref {
         static let voice = "voice"
         static let speed = "speed"
+        static let autoCast = "autoCast"
         static let continuousReading = "continuousReading"
         static let rememberHistory = "rememberHistory"
         static let hotkeyKeyCode = "hotkeyKeyCode"
@@ -142,10 +143,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func speakText(_ text: String) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, let timeline else { return }
+        guard !text.isEmpty, let engine, let timeline else { return }
 
         recordHistory(text)
-        do { try timeline.speak(text: text) }
+        do { try speakSelection(text, engine: engine, timeline: timeline) }
         catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
     }
 
@@ -327,8 +328,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             self.recordHistory(text)
-            do { try timeline.speak(text: text) }
+            do { try self.speakSelection(text, engine: engine, timeline: timeline) }
             catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
+        }
+    }
+
+    private func speakSelection(
+        _ text: String,
+        engine: OratorEngine,
+        timeline: SpeechTimeline
+    ) throws {
+        if defaults.bool(forKey: Pref.autoCast) {
+            let segments = DialogueCaster.cast(
+                text: text,
+                narratorVoice: engine.currentVoice,
+                pool: engine.voiceNames
+            )
+            try timeline.speak(segments: segments)
+        } else {
+            try timeline.speak(text: text)
         }
     }
 
@@ -828,6 +846,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func selectSpeed(_ sender: NSMenuItem) {
         guard let value = sender.representedObject as? Float else { return }
         setSelectedSpeed(value)
+    }
+
+    @objc private func toggleAutoCast() {
+        defaults.set(!defaults.bool(forKey: Pref.autoCast), forKey: Pref.autoCast)
+        rebuildMenu()
     }
 
     @objc private func openPronunciations() {
