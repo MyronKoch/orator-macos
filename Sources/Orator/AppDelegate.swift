@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotkeyRecorderWindowController: HotkeyRecorderWindowController?
     private var pronunciationsEditor: PronunciationsEditor?
     private var appVoiceProfilesEditor: AppVoiceProfilesEditor?
+    private var oratorWindowController: OratorWindowController?
     private var readerWindowController: ReaderWindowController?
     private var previewAudioPlayer: AVAudioPlayer?
     private var isPreviewRenderInFlight = false
@@ -32,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let defaults = UserDefaults.standard
     private let appProfiles = AppVoiceProfiles()
     private let history = ReadingHistory()
+    private let stats = ReadingStats()
     private var rememberHistory: Bool = {
         let defaults = UserDefaults.standard
         return defaults.object(forKey: "rememberHistory") == nil
@@ -61,10 +63,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Launch
 
+    private var serviceProvider: OratorServiceProvider?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
         setupStatusItem()
         loadEngineAsync()
+        registerServices()
 
         if AXIsProcessTrusted() {
             installKeyMonitor()
@@ -75,13 +80,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         NotificationCenter.default.addObserver(
             forName: .oratorSpeechStarted, object: nil, queue: .main
-        ) { [weak self] _ in Task { @MainActor in self?.updateIcon(speaking: true) } }
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.updateIcon(speaking: true)
+                self?.rebuildMenu()
+            }
+        }
         NotificationCenter.default.addObserver(
             forName: .oratorSpeechFinished, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.engine?.isSpeaking == false else { return }
                 self.updateIcon(speaking: false)
+                self.rebuildMenu()
             }
         }
         NotificationCenter.default.addObserver(
@@ -169,6 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         ? true
                         : self.defaults.bool(forKey: Pref.continuousReading)
                     self.rebuildMenu()
+                    self.oratorWindowController?.refresh()
                     NSLog("Orator: engine ready (%d voices)", engine.voiceNames.count)
                 }
             } catch {
@@ -341,7 +353,136 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func recordHistory(_ text: String) {
         guard rememberHistory else { return }
         history.add(text)
+        // Reading stats share the "remember my reading" switch. Cast reads are
+        // not produced by the features on this branch.
+        stats.record(
+            text: text,
+            sourceApp: lastReadApp?.name,
+            voiceName: engine?.currentVoice ?? "af_heart",
+            cast: false,
+            speed: engine?.speed ?? 1.0
+        )
+        oratorWindowController?.refreshDashboard()
         rebuildMenu()
+    }
+
+    /// Snapshot of local reading stats for the Dashboard and the menu teaser.
+    var statsSnapshot: ReadingStatsSnapshot { stats.snapshot() }
+    var reading: ReadingStats { stats }
+
+    // MARK: - Orator window settings bridge
+
+    var availableVoiceNames: [String] { engine?.voiceNames ?? [] }
+    var selectedVoiceName: String { engine?.currentVoice ?? defaults.string(forKey: Pref.voice) ?? "af_heart" }
+    var selectedSpeed: Float {
+        if let engine { return engine.speed }
+        let saved = defaults.float(forKey: Pref.speed)
+        return saved > 0 ? saved : 1.0
+    }
+    var availableSpeedOptions: [Float] { Self.speedOptions }
+    var startAtLoginEnabled: Bool { SMAppService.mainApp.status == .enabled }
+    var remembersReading: Bool { rememberHistory }
+    var continuousReadingEnabled: Bool { continuousReading }
+    var recentReadingEntries: [HistoryEntry] { history.entries }
+
+    func setSelectedVoice(_ name: String) {
+        guard let engine, engine.voiceNames.contains(name) else { return }
+        queuePlaybackActive = false
+        engine.stop()
+        engine.currentVoice = name
+        defaults.set(name, forKey: Pref.voice)
+        rebuildMenu()
+    }
+
+    func setSelectedSpeed(_ value: Float) {
+        guard let engine, Self.speedOptions.contains(where: { abs($0 - value) < 0.001 }) else { return }
+        engine.speed = value
+        defaults.set(value, forKey: Pref.speed)
+        rebuildMenu()
+    }
+
+    func updateWeeklyGoalWords(_ words: Int) -> ReadingStatsSnapshot {
+        reading.weeklyGoalWords = max(0, words)
+        let updated = statsSnapshot
+        rebuildMenu()
+        return updated
+    }
+
+    func setStartAtLogin(_ enabled: Bool) {
+        do {
+            if enabled, SMAppService.mainApp.status != .enabled {
+                try SMAppService.mainApp.register()
+            } else if !enabled, SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            NSLog("Orator: login item update failed: %@", error.localizedDescription)
+        }
+        rebuildMenu()
+    }
+
+    func setRemembersReading(_ enabled: Bool) {
+        rememberHistory = enabled
+        defaults.set(enabled, forKey: Pref.rememberHistory)
+        rebuildMenu()
+    }
+
+    func setContinuousReading(_ enabled: Bool) {
+        continuousReading = enabled
+        defaults.set(enabled, forKey: Pref.continuousReading)
+        rebuildMenu()
+    }
+
+    func clearReadingHistory() {
+        history.clear()
+        rebuildMenu()
+    }
+
+    func clearReadingStats() {
+        reading.clear()
+        oratorWindowController?.refreshDashboard()
+        rebuildMenu()
+    }
+
+    func speakHistoryText(_ text: String) {
+        guard let timeline else { return }
+        do { try timeline.speak(text: text) }
+        catch { oratorLog("history speak FAILED: \(error.localizedDescription)") }
+    }
+
+    func makePronunciationsContentView() -> NSView {
+        if pronunciationsEditor == nil {
+            pronunciationsEditor = PronunciationsEditor(pronunciations: .shared)
+        }
+        return pronunciationsEditor!.makeContentView()
+    }
+
+    func refreshPronunciationsEditor() {
+        pronunciationsEditor?.reload()
+    }
+
+    func makeShortcutsContentView() -> NSView {
+        ensureHotkeyRecorder()
+        return hotkeyRecorderWindowController!.makeContentView()
+    }
+
+    func refreshShortcutsEditor() {
+        hotkeyRecorderWindowController?.refresh()
+    }
+
+    func stopShortcutRecording() {
+        hotkeyRecorderWindowController?.stopRecording()
+    }
+
+    func makeAppVoiceProfilesContentView() -> NSView {
+        ensureAppVoiceProfilesEditor()
+        appVoiceProfilesEditor?.updateVoiceNames(availableVoiceNames)
+        return appVoiceProfilesEditor!.makeContentView()
+    }
+
+    func refreshAppVoiceProfilesEditor() {
+        appVoiceProfilesEditor?.updateVoiceNames(availableVoiceNames)
+        appVoiceProfilesEditor?.reload()
     }
 
     /// Simulate Cmd+C, read the pasteboard, then restore the user's clipboard.
@@ -429,12 +570,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func rebuildMenu() {
         let menu = NSMenu()
+        menu.autoenablesItems = false
 
         let title = NSMenuItem(title: "Orator", action: nil, keyEquivalent: "")
+        title.image = Self.menuBarIdleIcon
         title.isEnabled = false
+        // Show the version right in the header so a bug report can name it at a glance.
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        let headerText = NSMutableAttributedString(
+            string: "Orator",
+            attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold)]
+        )
+        headerText.append(NSAttributedString(
+            string: "  v\(appVersion)",
+            attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]
+        ))
+        title.attributedTitle = headerText
         menu.addItem(title)
 
-        // Status line
         let status: String
         if let err = engineError {
             status = "⚠️ \(err)"
@@ -442,12 +595,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             status = "Loading voices…"
         } else if !AXIsProcessTrusted() {
             status = "⚠️ Needs Accessibility permission"
+        } else if engine?.isPaused == true {
+            status = "Paused"
+        } else if engine?.isSpeaking == true {
+            status = "Reading"
         } else {
             status = "Ready — select text, press \(Self.hotKeyLabel)"
         }
         let statusLine = NSMenuItem(title: status, action: nil, keyEquivalent: "")
         statusLine.isEnabled = false
         menu.addItem(statusLine)
+
+        if engine?.isSpeaking == true,
+           let current = timeline?.current,
+           current.chunks.indices.contains(current.baseIndex) {
+            let prefix = queueItemTitle(for: current.chunks[current.baseIndex])
+            let nowReading = NSMenuItem(title: "Now reading: \(prefix)", action: nil, keyEquivalent: "")
+            nowReading.isEnabled = false
+            menu.addItem(nowReading)
+        }
 
         if !AXIsProcessTrusted() {
             let fix = NSMenuItem(title: "Grant Permission…", action: #selector(openOnboarding), keyEquivalent: "")
@@ -457,6 +623,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         if engine != nil {
+            // Open Reader is the flagship entry point - promote it to the very
+            // top, larger and bolder, with the reader glyph, set apart by its
+            // own separator.
+            let openReader = NSMenuItem(title: "Open Reader…", action: #selector(openReader), keyEquivalent: "")
+            openReader.target = self
+            openReader.image = NSImage(systemSymbolName: "book.pages", accessibilityDescription: nil)
+            openReader.attributedTitle = NSAttributedString(
+                string: "Open Reader…",
+                attributes: [.font: NSFont.systemFont(ofSize: 15, weight: .semibold)]
+            )
+            menu.addItem(openReader)
+            menu.addItem(.separator())
+
             let readFile = NSMenuItem(
                 title: "Read File…",
                 action: #selector(readFile),
@@ -465,23 +644,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             readFile.target = self
             menu.addItem(readFile)
 
-            let speakClipboard = NSMenuItem(title: "Speak Clipboard", action: #selector(speakClipboardText), keyEquivalent: "")
+            let speakClipboard = NSMenuItem(
+                title: "Speak Clipboard (\(hotkeyDisplay(for: .speak)))",
+                action: #selector(speakClipboardText),
+                keyEquivalent: ""
+            )
             speakClipboard.target = self
             menu.addItem(speakClipboard)
-
-            let openReader = NSMenuItem(title: "Open Reader…", action: #selector(openReader), keyEquivalent: "")
-            openReader.target = self
-            menu.addItem(openReader)
-
-            let stopItem = NSMenuItem(title: "Stop Speaking", action: #selector(stopSpeaking), keyEquivalent: "")
-            stopItem.target = self
-            menu.addItem(stopItem)
 
             let pauseActionTitle = engine?.isPaused == true ? "Resume Speaking" : "Pause Speaking"
             let pauseTitle = "\(pauseActionTitle) (\(hotkeyDisplay(for: .pause)))"
             let pauseItem = NSMenuItem(title: pauseTitle, action: #selector(pauseResumeSpeaking), keyEquivalent: "")
             pauseItem.target = self
+            pauseItem.isEnabled = engine?.isSpeaking == true || engine?.isPaused == true
             menu.addItem(pauseItem)
+
+            let stopItem = NSMenuItem(title: "Stop", action: #selector(stopSpeaking), keyEquivalent: "")
+            stopItem.target = self
+            stopItem.isEnabled = engine?.isSpeaking == true || engine?.isPaused == true
+            menu.addItem(stopItem)
             menu.addItem(.separator())
 
             let queueRoot = NSMenuItem(title: "Queue", action: nil, keyEquivalent: "")
@@ -511,9 +692,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             queueCount.isEnabled = false
             queueMenu.addItem(queueCount)
 
-            for text in readingQueue {
-                let item = NSMenuItem(title: queueItemTitle(for: text), action: nil, keyEquivalent: "")
-                item.isEnabled = false
+            for (index, text) in readingQueue.enumerated() {
+                // Clicking a queued item removes it. The ✕ + tooltip make the
+                // "click to remove" affordance discoverable.
+                let item = NSMenuItem(
+                    title: "✕  \(queueItemTitle(for: text))",
+                    action: #selector(removeQueueItem(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = index
+                item.toolTip = "Remove this item from the queue"
                 queueMenu.addItem(item)
             }
 
@@ -547,16 +736,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 clearQueue.target = self
                 queueMenu.addItem(clearQueue)
             }
-            queueMenu.addItem(.separator())
-
-            let continuousReadingItem = NSMenuItem(
-                title: "Continuous Reading",
-                action: #selector(toggleContinuousReading),
-                keyEquivalent: ""
-            )
-            continuousReadingItem.target = self
-            continuousReadingItem.state = continuousReading ? .on : .off
-            queueMenu.addItem(continuousReadingItem)
             queueRoot.submenu = queueMenu
             menu.addItem(queueRoot)
 
@@ -589,141 +768,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(exportRoot)
         }
 
-        let historyRoot = NSMenuItem(title: "History", action: nil, keyEquivalent: "")
-        let historyMenu = NSMenu()
-        let historyEntries = history.entries
-        if historyEntries.isEmpty {
-            let emptyHistory = NSMenuItem(title: "No recent reads", action: nil, keyEquivalent: "")
-            emptyHistory.isEnabled = false
-            historyMenu.addItem(emptyHistory)
-        } else {
-            for entry in historyEntries.prefix(20) {
-                let item = NSMenuItem(
-                    title: entry.title,
-                    action: #selector(readHistoryEntry(_:)),
-                    keyEquivalent: ""
-                )
-                item.target = self
-                item.representedObject = entry.text
-                item.isEnabled = engine != nil
-                historyMenu.addItem(item)
-            }
-        }
-        historyMenu.addItem(.separator())
-
-        let rememberHistoryItem = NSMenuItem(
-            title: "Remember Reading History",
-            action: #selector(toggleRememberHistory),
-            keyEquivalent: ""
-        )
-        rememberHistoryItem.target = self
-        rememberHistoryItem.state = rememberHistory ? .on : .off
-        historyMenu.addItem(rememberHistoryItem)
-
-        let clearHistoryItem = NSMenuItem(
-            title: "Clear History",
-            action: #selector(clearHistory),
-            keyEquivalent: ""
-        )
-        clearHistoryItem.target = self
-        historyMenu.addItem(clearHistoryItem)
-
-        historyRoot.submenu = historyMenu
-        menu.addItem(historyRoot)
         menu.addItem(.separator())
 
-        if let engine = engine {
-            // Voice picker
-            let voiceRoot = NSMenuItem(title: "Voice", action: nil, keyEquivalent: "")
-            let voiceMenu = NSMenu()
-            for name in engine.voiceNames {
-                let item = NSMenuItem(title: displayName(for: name), action: #selector(selectVoice(_:)), keyEquivalent: "")
-                item.representedObject = name
-                item.target = self
-                item.state = name == engine.currentVoice ? .on : .off
-                voiceMenu.addItem(item)
-            }
-            voiceRoot.submenu = voiceMenu
-            menu.addItem(voiceRoot)
-
-            // Speed picker
-            let speedRoot = NSMenuItem(title: "Speed", action: nil, keyEquivalent: "")
-            let speedMenu = NSMenu()
-            for value in Self.speedOptions {
-                let item = NSMenuItem(title: String(format: "%.2gx", value), action: #selector(selectSpeed(_:)), keyEquivalent: "")
-                item.representedObject = value
-                item.target = self
-                item.state = abs(engine.speed - value) < 0.01 ? .on : .off
-                speedMenu.addItem(item)
-            }
-            speedRoot.submenu = speedMenu
-            menu.addItem(speedRoot)
-
-            let autoCast = NSMenuItem(
-                title: "Auto-cast dialogue",
-                action: #selector(toggleAutoCast),
-                keyEquivalent: ""
-            )
-            autoCast.target = self
-            autoCast.state = defaults.bool(forKey: Pref.autoCast) ? .on : .off
-            menu.addItem(autoCast)
-
-            let pronunciations = NSMenuItem(
-                title: "Pronunciations…",
-                action: #selector(openPronunciations),
-                keyEquivalent: ""
-            )
-            pronunciations.target = self
-            menu.addItem(pronunciations)
-
-            let perAppVoices = NSMenuItem(
-                title: "Per-App Voices…",
-                action: #selector(openPerAppVoices),
-                keyEquivalent: ""
-            )
-            perAppVoices.target = self
-            menu.addItem(perAppVoices)
-
-            if let app = lastReadApp {
-                let saveProfile = NSMenuItem(
-                    title: "Use current voice for \(app.name)",
-                    action: #selector(saveVoiceForLastReadApp),
-                    keyEquivalent: ""
-                )
-                saveProfile.target = self
-                menu.addItem(saveProfile)
-
-                if appProfiles.profile(for: app.bundleID) != nil {
-                    let clearProfile = NSMenuItem(
-                        title: "Clear voice for \(app.name)",
-                        action: #selector(clearVoiceForLastReadApp),
-                        keyEquivalent: ""
-                    )
-                    clearProfile.target = self
-                    menu.addItem(clearProfile)
-                }
-            }
-            menu.addItem(.separator())
-
-            let speakTest = NSMenuItem(title: "Speak Test Sentence", action: #selector(speakTestSentence), keyEquivalent: "")
-            speakTest.target = self
-            menu.addItem(speakTest)
-            menu.addItem(.separator())
-        }
-
-        let recordShortcut = NSMenuItem(
-            title: "Keyboard Shortcuts…",
-            action: #selector(openHotkeyRecorder),
-            keyEquivalent: ""
+        let snapshot = statsSnapshot
+        let teaserItem = NSMenuItem()
+        let teaser = MenuStatsTeaser(
+            snapshot: snapshot,
+            target: self,
+            action: #selector(openDashboard)
         )
-        recordShortcut.target = self
-        menu.addItem(recordShortcut)
+        teaser.menuItem = teaserItem
+        teaserItem.view = teaser
+        menu.addItem(teaserItem)
+        menu.addItem(.separator())
 
-        // Login item toggle
-        let login = NSMenuItem(title: "Start at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
-        login.target = self
-        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        menu.addItem(login)
+        let dashboard = NSMenuItem(
+            title: "Dashboard…",
+            action: #selector(openDashboard),
+            keyEquivalent: "d"
+        )
+        dashboard.target = self
+        menu.addItem(dashboard)
+
+        let settings = NSMenuItem(
+            title: "Orator Settings…",
+            action: #selector(openOratorSettings),
+            keyEquivalent: ","
+        )
+        settings.target = self
+        menu.addItem(settings)
+
+        menu.addItem(.separator())
 
         let quit = NSMenuItem(title: "Quit Orator", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
@@ -732,7 +807,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
-    private func displayName(for voice: String) -> String {
+    func displayName(for voice: String) -> String {
         let parts = voice.split(separator: "_")
         guard parts.count == 2 else { return voice }
         let accent = parts[0].hasPrefix("a") ? "US" : "UK"
@@ -748,20 +823,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Menu actions
 
+    @objc private func openDashboard() {
+        showOratorWindow(tab: .dashboard)
+    }
+
+    @objc private func openOratorSettings() {
+        showOratorWindow(tab: .voices)
+    }
+
+    private func showOratorWindow(tab: OratorTab) {
+        if oratorWindowController == nil {
+            oratorWindowController = OratorWindowController(appDelegate: self)
+        }
+        oratorWindowController?.show(tab: tab)
+    }
+
     @objc private func selectVoice(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String, let engine = engine else { return }
-        queuePlaybackActive = false
-        engine.stop()
-        engine.currentVoice = name
-        defaults.set(name, forKey: Pref.voice)
-        rebuildMenu()
+        guard let name = sender.representedObject as? String else { return }
+        setSelectedVoice(name)
     }
 
     @objc private func selectSpeed(_ sender: NSMenuItem) {
-        guard let value = sender.representedObject as? Float, let engine = engine else { return }
-        engine.speed = value
-        defaults.set(value, forKey: Pref.speed)
-        rebuildMenu()
+        guard let value = sender.representedObject as? Float else { return }
+        setSelectedSpeed(value)
     }
 
     @objc private func toggleAutoCast() {
@@ -777,6 +861,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openHotkeyRecorder() {
+        ensureHotkeyRecorder()
+        hotkeyRecorderWindowController?.show()
+    }
+
+    private func ensureHotkeyRecorder() {
         if hotkeyRecorderWindowController == nil {
             hotkeyRecorderWindowController = HotkeyRecorderWindowController(
                 hotkeyManager: hotkeyManager,
@@ -787,7 +876,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             )
         }
-        hotkeyRecorderWindowController?.show()
     }
 
     @objc private func saveVoiceForLastReadApp() {
@@ -810,6 +898,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openPerAppVoices() {
+        ensureAppVoiceProfilesEditor()
+        appVoiceProfilesEditor?.show()
+    }
+
+    private func ensureAppVoiceProfilesEditor() {
         if appVoiceProfilesEditor == nil {
             appVoiceProfilesEditor = AppVoiceProfilesEditor(
                 profiles: appProfiles,
@@ -823,7 +916,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             )
         }
-        appVoiceProfilesEditor?.show()
     }
 
     func previewVoice(_ voiceName: String, speed: Float) {
@@ -850,16 +942,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleLoginItem() {
-        do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
-            } else {
-                try SMAppService.mainApp.register()
-            }
-        } catch {
-            NSLog("Orator: login item toggle failed: %@", error.localizedDescription)
-        }
-        rebuildMenu()
+        setStartAtLogin(!startAtLoginEnabled)
     }
 
     @objc private func addSelectionToQueue() {
@@ -873,26 +956,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleContinuousReading() {
-        continuousReading.toggle()
-        defaults.set(continuousReading, forKey: Pref.continuousReading)
-        rebuildMenu()
+        setContinuousReading(!continuousReading)
     }
 
     @objc private func readHistoryEntry(_ sender: NSMenuItem) {
-        guard let timeline, let text = sender.representedObject as? String else { return }
-        do { try timeline.speak(text: text) }
-        catch { oratorLog("history speak FAILED: \(error.localizedDescription)") }
+        guard let text = sender.representedObject as? String else { return }
+        speakHistoryText(text)
     }
 
     @objc private func toggleRememberHistory() {
-        rememberHistory.toggle()
-        defaults.set(rememberHistory, forKey: Pref.rememberHistory)
-        rebuildMenu()
+        setRemembersReading(!rememberHistory)
     }
 
     @objc private func clearHistory() {
-        history.clear()
-        rebuildMenu()
+        clearReadingHistory()
     }
 
     private func addToReadingQueue(_ text: String?) {
@@ -943,6 +1020,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         readingQueue.removeAll()
         rebuildMenu()
     }
+
+    @objc private func removeQueueItem(_ sender: NSMenuItem) {
+        guard let index = sender.representedObject as? Int,
+              readingQueue.indices.contains(index) else { return }
+        readingQueue.remove(at: index)
+        rebuildMenu()
+    }
+
+    // MARK: - macOS Services (right-click on a selection)
+
+    /// Register the services provider so the Info.plist NSServices entries
+    /// resolve to real handlers, then refresh the system's dynamic services so
+    /// they show up without a re-login.
+    private func registerServices() {
+        let provider = OratorServiceProvider()
+        NSApp.servicesProvider = provider
+        serviceProvider = provider
+        NSUpdateDynamicServices()
+    }
+
+    /// Speak text handed over by the "Speak with Orator" Service.
+    func serviceSpeak(_ text: String) { speakText(text) }
+
+    /// Queue text handed over by the "Add to Orator Queue" Service.
+    func serviceQueue(_ text: String) { addToReadingQueue(text) }
 
     @objc private func speakClipboardText() {
         speakClipboard()
@@ -1297,12 +1399,14 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
     }
 
     private let profiles: AppVoiceProfiles
-    private let voiceNames: [String]
+    private var voiceNames: [String]
     private let speedOptions: [Float]
     private let onPreview: (_ voiceName: String, _ speed: Float) -> Void
     private let onChange: @MainActor () -> Void
     private let window: NSWindow
-    private let tableView = NSTableView()
+    private var tableViews: [NSTableView] = []
+    private var addButtonTables: [ObjectIdentifier: NSTableView] = [:]
+    private weak var pendingSelectionTableView: NSTableView?
     private var rows: [(bundleID: String, profile: Profile)]
 
     init(
@@ -1334,21 +1438,36 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    func updateVoiceNames(_ names: [String]) {
+        voiceNames = names
+    }
+
     func reload() {
         rows = profiles.all
-        tableView.reloadData()
+        for tableView in tableViews {
+            tableView.reloadData()
+        }
     }
 
     private func configureWindow() {
         window.title = "Per-App Voices"
         window.center()
         window.isReleasedWhenClosed = false
+        window.contentView = makeContentView(
+            edgeInsets: NSEdgeInsets(top: 22, left: 24, bottom: 22, right: 24)
+        )
+    }
 
+    /// Creates a distinct control hierarchy for each host. The editor remains
+    /// the shared store-backed data source for every table it vends.
+    func makeContentView(
+        edgeInsets: NSEdgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+    ) -> NSView {
         let content = NSStackView()
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 12
-        content.edgeInsets = NSEdgeInsets(top: 22, left: 24, bottom: 22, right: 24)
+        content.edgeInsets = edgeInsets
 
         let heading = NSTextField(labelWithString: "Per-App Voices")
         heading.font = .systemFont(ofSize: 20, weight: .semibold)
@@ -1362,29 +1481,30 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
 
         let appColumn = NSTableColumn(identifier: Column.app)
         appColumn.title = "App"
-        appColumn.width = 220
-        appColumn.minWidth = 140
+        appColumn.width = 140
+        appColumn.minWidth = 100
 
         let voiceColumn = NSTableColumn(identifier: Column.voice)
         voiceColumn.title = "Voice"
-        voiceColumn.width = 190
-        voiceColumn.minWidth = 120
+        voiceColumn.width = 132
+        voiceColumn.minWidth = 100
 
         let speedColumn = NSTableColumn(identifier: Column.speed)
         speedColumn.title = "Speed"
-        speedColumn.width = 80
-        speedColumn.minWidth = 60
+        speedColumn.width = 64
+        speedColumn.minWidth = 54
 
         let previewColumn = NSTableColumn(identifier: Column.preview)
         previewColumn.title = "Preview"
-        previewColumn.width = 90
-        previewColumn.minWidth = 80
+        previewColumn.width = 78
+        previewColumn.minWidth = 72
 
         let removeColumn = NSTableColumn(identifier: Column.remove)
         removeColumn.title = "Remove"
-        removeColumn.width = 90
-        removeColumn.minWidth = 80
+        removeColumn.width = 76
+        removeColumn.minWidth = 70
 
+        let tableView = NSTableView()
         tableView.addTableColumn(appColumn)
         tableView.addTableColumn(voiceColumn)
         tableView.addTableColumn(speedColumn)
@@ -1399,11 +1519,10 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
 
         let scrollView = NSScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .bezelBorder
-        scrollView.widthAnchor.constraint(equalToConstant: 612).isActive = true
-        scrollView.heightAnchor.constraint(equalToConstant: 240).isActive = true
 
         let addButton = NSButton(title: "Add App…", target: self, action: #selector(showAddAppMenu(_:)))
         addButton.bezelStyle = .rounded
@@ -1412,8 +1531,17 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         content.addArrangedSubview(body)
         content.addArrangedSubview(scrollView)
         content.addArrangedSubview(addButton)
+        NSLayoutConstraint.activate([
+            scrollView.widthAnchor.constraint(
+                equalTo: content.widthAnchor,
+                constant: -(edgeInsets.left + edgeInsets.right)
+            ),
+            scrollView.heightAnchor.constraint(equalToConstant: 240),
+        ])
 
-        window.contentView = content
+        tableViews.append(tableView)
+        addButtonTables[ObjectIdentifier(addButton)] = tableView
+        return content
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -1486,6 +1614,7 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
     }
 
     @objc private func showAddAppMenu(_ sender: NSButton) {
+        pendingSelectionTableView = addButtonTables[ObjectIdentifier(sender)]
         let existingBundleIDs = Set(rows.map { $0.bundleID })
         let ownBundleID = Bundle.main.bundleIdentifier
         var seenBundleIDs = existingBundleIDs
@@ -1526,9 +1655,13 @@ private final class AppVoiceProfilesEditor: NSObject, NSTableViewDataSource, NST
         )
         reload()
         if let row = rows.firstIndex(where: { $0.bundleID == bundleID }) {
-            tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            tableView.scrollRowToVisible(row)
+            pendingSelectionTableView?.selectRowIndexes(
+                IndexSet(integer: row),
+                byExtendingSelection: false
+            )
+            pendingSelectionTableView?.scrollRowToVisible(row)
         }
+        pendingSelectionTableView = nil
         onChange()
     }
 
@@ -1584,10 +1717,15 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
         static let respelling = NSUserInterfaceItemIdentifier("pronunciationRespelling")
     }
 
+    private struct ViewControls {
+        let tableView: NSTableView
+        let removeButton: NSButton
+    }
+
     private let pronunciations: Pronunciations
     private let window: NSWindow
-    private let tableView = NSTableView()
-    private var removeButton: NSButton!
+    private var viewControls: [ViewControls] = []
+    private var buttonTables: [ObjectIdentifier: NSTableView] = [:]
     private var rows: [(key: String, value: String)]
 
     init(pronunciations: Pronunciations) {
@@ -1604,23 +1742,35 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
     }
 
     func show() {
-        rows = pronunciations.entries
-        tableView.reloadData()
-        updateRemoveButton()
+        reload()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func reload() {
+        rows = pronunciations.entries
+        reloadTables()
     }
 
     private func configureWindow() {
         window.title = "Pronunciations"
         window.center()
         window.isReleasedWhenClosed = false
+        window.contentView = makeContentView(
+            edgeInsets: NSEdgeInsets(top: 22, left: 24, bottom: 22, right: 24)
+        )
+    }
 
+    /// Builds fresh controls for a window or tab while keeping all tables
+    /// synchronized through Pronunciations.shared.
+    func makeContentView(
+        edgeInsets: NSEdgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+    ) -> NSView {
         let content = NSStackView()
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 12
-        content.edgeInsets = NSEdgeInsets(top: 22, left: 24, bottom: 22, right: 24)
+        content.edgeInsets = edgeInsets
 
         let heading = NSTextField(labelWithString: "Pronunciation Dictionary")
         heading.font = .systemFont(ofSize: 20, weight: .semibold)
@@ -1642,6 +1792,7 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
         respellingColumn.width = 256
         respellingColumn.minWidth = 160
 
+        let tableView = NSTableView()
         tableView.addTableColumn(wordColumn)
         tableView.addTableColumn(respellingColumn)
         tableView.dataSource = self
@@ -1653,15 +1804,18 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
         tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
 
         let scrollView = NSScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .bezelBorder
-        scrollView.widthAnchor.constraint(equalToConstant: 492).isActive = true
-        scrollView.heightAnchor.constraint(equalToConstant: 238).isActive = true
 
-        let addButton = NSButton(title: "Add", target: self, action: #selector(addEntry))
+        let addButton = NSButton(title: "Add", target: self, action: #selector(addEntry(_:)))
         addButton.bezelStyle = .rounded
-        removeButton = NSButton(title: "Remove", target: self, action: #selector(removeEntry))
+        let removeButton = NSButton(
+            title: "Remove",
+            target: self,
+            action: #selector(removeEntry(_:))
+        )
         removeButton.bezelStyle = .rounded
 
         let buttons = NSStackView(views: [addButton, removeButton])
@@ -1672,22 +1826,35 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
         content.addArrangedSubview(body)
         content.addArrangedSubview(scrollView)
         content.addArrangedSubview(buttons)
+        NSLayoutConstraint.activate([
+            scrollView.widthAnchor.constraint(
+                equalTo: content.widthAnchor,
+                constant: -(edgeInsets.left + edgeInsets.right)
+            ),
+            scrollView.heightAnchor.constraint(equalToConstant: 238),
+        ])
 
-        window.contentView = content
-        updateRemoveButton()
+        viewControls.append(ViewControls(tableView: tableView, removeButton: removeButton))
+        buttonTables[ObjectIdentifier(addButton)] = tableView
+        buttonTables[ObjectIdentifier(removeButton)] = tableView
+        updateRemoveButtons()
+        return content
     }
 
-    @objc private func addEntry() {
+    @objc private func addEntry(_ sender: NSButton) {
+        guard let tableView = buttonTables[ObjectIdentifier(sender)] else { return }
         rows.append((key: "", value: ""))
-        tableView.reloadData()
+        reloadTables()
 
         let row = rows.count - 1
         tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         tableView.scrollRowToVisible(row)
         tableView.editColumn(0, row: row, with: nil, select: true)
+        updateRemoveButtons()
     }
 
-    @objc private func removeEntry() {
+    @objc private func removeEntry(_ sender: NSButton) {
+        guard let tableView = buttonTables[ObjectIdentifier(sender)] else { return }
         let row = tableView.selectedRow
         guard rows.indices.contains(row) else { return }
 
@@ -1696,13 +1863,13 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
             pronunciations.remove(key: key)
         }
         rows.remove(at: row)
-        tableView.reloadData()
+        reloadTables()
 
         if !rows.isEmpty {
             let nextRow = min(row, rows.count - 1)
             tableView.selectRowIndexes(IndexSet(integer: nextRow), byExtendingSelection: false)
         }
-        updateRemoveButton()
+        updateRemoveButtons()
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -1737,11 +1904,12 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        updateRemoveButton()
+        updateRemoveButtons()
     }
 
     func controlTextDidEndEditing(_ obj: Notification) {
-        guard let field = obj.object as? NSTextField else { return }
+        guard let field = obj.object as? NSTextField,
+              let tableView = containingTableView(for: field) else { return }
         let row = tableView.row(for: field)
         let column = tableView.column(for: field)
         guard rows.indices.contains(row), tableView.tableColumns.indices.contains(column) else { return }
@@ -1768,9 +1936,31 @@ private final class PronunciationsEditor: NSObject, NSTableViewDataSource, NSTab
         } else {
             pronunciations.add(key: newKey, value: rows[row].value)
         }
+
+        reloadTables(excluding: tableView)
     }
 
-    private func updateRemoveButton() {
-        removeButton?.isEnabled = tableView.selectedRow >= 0
+    private func reloadTables(excluding excludedTableView: NSTableView? = nil) {
+        for controls in viewControls where controls.tableView !== excludedTableView {
+            controls.tableView.reloadData()
+        }
+        updateRemoveButtons()
+    }
+
+    private func updateRemoveButtons() {
+        for controls in viewControls {
+            controls.removeButton.isEnabled = controls.tableView.selectedRow >= 0
+        }
+    }
+
+    private func containingTableView(for view: NSView) -> NSTableView? {
+        var ancestor: NSView? = view
+        while let current = ancestor {
+            if let tableView = current as? NSTableView {
+                return tableView
+            }
+            ancestor = current.superview
+        }
+        return nil
     }
 }
