@@ -187,6 +187,17 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
         sidebarScroll.drawsBackground = false
         sidebarBackground.addSubview(sidebarScroll)
 
+        // Version pinned to the sidebar foot - always answerable "what build am I on?"
+        let sidebarVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+            ?? "dev"
+        let versionLabel = NSTextField(labelWithString: "v\(sidebarVersion)")
+        versionLabel.translatesAutoresizingMaskIntoConstraints = false
+        versionLabel.font = .systemFont(ofSize: 11)
+        versionLabel.textColor = .tertiaryLabelColor
+        // addSubview BEFORE any constraint activation (guards the "no common ancestor" abort).
+        sidebarBackground.addSubview(versionLabel)
+
         let separator = NSBox()
         separator.translatesAutoresizingMaskIntoConstraints = false
         separator.boxType = .separator
@@ -205,7 +216,10 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
             sidebarScroll.leadingAnchor.constraint(equalTo: sidebarBackground.leadingAnchor, constant: 8),
             sidebarScroll.trailingAnchor.constraint(equalTo: sidebarBackground.trailingAnchor, constant: -8),
             sidebarScroll.topAnchor.constraint(equalTo: sidebarBackground.topAnchor, constant: 16),
-            sidebarScroll.bottomAnchor.constraint(equalTo: sidebarBackground.bottomAnchor, constant: -12),
+            sidebarScroll.bottomAnchor.constraint(equalTo: versionLabel.topAnchor, constant: -8),
+
+            versionLabel.leadingAnchor.constraint(equalTo: sidebarBackground.leadingAnchor, constant: 16),
+            versionLabel.bottomAnchor.constraint(equalTo: sidebarBackground.bottomAnchor, constant: -12),
 
             separator.leadingAnchor.constraint(equalTo: sidebarBackground.trailingAnchor),
             separator.widthAnchor.constraint(equalToConstant: 1),

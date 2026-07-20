@@ -557,6 +557,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let title = NSMenuItem(title: "Orator", action: nil, keyEquivalent: "")
         title.image = Self.menuBarIdleIcon
         title.isEnabled = false
+        // Show the version right in the header so a bug report can name it at a glance.
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        let headerText = NSMutableAttributedString(
+            string: "Orator",
+            attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold)]
+        )
+        headerText.append(NSAttributedString(
+            string: "  v\(appVersion)",
+            attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]
+        ))
+        title.attributedTitle = headerText
         menu.addItem(title)
 
         let status: String
