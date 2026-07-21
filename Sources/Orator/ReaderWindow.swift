@@ -47,7 +47,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     private let playPauseButton = NSButton()
     private let stopButton = NSButton()
     private let forwardButton = NSButton()
-    private var highlightedRange: NSRange?
+    private var highlightedWordRange: NSRange?
+    private var highlightedSentenceRange: NSRange?
     private var suppressAutoScrollUntil: TimeInterval = 0
 
     // Reader text size (⌘+/⌘-/⌘0), persisted across sessions.
@@ -317,7 +318,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         )
         // The word highlight is a temporary layout attribute; re-apply it so it
         // survives the relayout a font change triggers.
-        if let range = highlightedRange { showHighlight(for: range) }
+        if let range = highlightedWordRange { showHighlight(for: range) }
     }
 
     private func changeReaderFontSize(by delta: CGFloat) {
@@ -338,22 +339,56 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
               let layoutManager = textView.layoutManager
         else { return }
 
+        // Two tiers: a soft wash over the whole sentence (keeps your place) and
+        // a stronger "ball" on the current word, drawn on top.
+        let sentence = Self.enclosingSentenceRange(for: range, in: textView.string)
         layoutManager.addTemporaryAttribute(
             .backgroundColor,
-            value: NSColor.controlAccentColor.withAlphaComponent(0.35),
+            value: NSColor.systemYellow.withAlphaComponent(0.22),
+            forCharacterRange: sentence
+        )
+        layoutManager.addTemporaryAttribute(
+            .backgroundColor,
+            value: NSColor.systemBlue.withAlphaComponent(0.5),
             forCharacterRange: range
         )
-        highlightedRange = range
+        highlightedSentenceRange = sentence
+        highlightedWordRange = range
         scrollToHighlightedWordIfNeeded(range)
     }
 
     private func clearHighlight() {
-        guard let range = highlightedRange else { return }
-        textView.layoutManager?.removeTemporaryAttribute(
-            .backgroundColor,
-            forCharacterRange: range
-        )
-        highlightedRange = nil
+        // Removing the sentence wash also clears the word (it's nested inside);
+        // clear both explicitly in case the word ever sits at an edge.
+        for range in [highlightedSentenceRange, highlightedWordRange].compactMap({ $0 }) {
+            textView.layoutManager?.removeTemporaryAttribute(.backgroundColor, forCharacterRange: range)
+        }
+        highlightedSentenceRange = nil
+        highlightedWordRange = nil
+    }
+
+    /// Expand a word range to the sentence/line that contains it, bounded by
+    /// sentence-ending punctuation or a line break.
+    private static func enclosingSentenceRange(for wordRange: NSRange, in text: String) -> NSRange {
+        let ns = text as NSString
+        let length = ns.length
+        func isBoundary(_ c: unichar) -> Bool {
+            let s = UnicodeScalar(c)
+            return s.map { ".!?;\n\r".unicodeScalars.contains($0) } ?? false
+        }
+        func isWhitespace(_ c: unichar) -> Bool {
+            UnicodeScalar(c).map { CharacterSet.whitespacesAndNewlines.contains($0) } ?? false
+        }
+        var start = min(wordRange.location, length)
+        while start > 0, !isBoundary(ns.character(at: start - 1)) { start -= 1 }
+        var end = min(NSMaxRange(wordRange), length)
+        while end < length {
+            let c = ns.character(at: end)
+            end += 1
+            if isBoundary(c) { break }
+        }
+        while start < end, isWhitespace(ns.character(at: start)) { start += 1 }
+        return NSRange(location: start, length: max(0, end - start))
     }
 
     private func scrollToHighlightedWordIfNeeded(_ characterRange: NSRange) {
