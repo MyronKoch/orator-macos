@@ -9,7 +9,54 @@ enum ReadableText {
         cleaned = processBlockStructure(in: cleaned)
         cleaned = cleanInlineMarkup(in: cleaned)
         cleaned = replaceBareURLs(in: cleaned)
-        return collapseParagraphBreaks(in: cleaned)
+        cleaned = collapseParagraphBreaks(in: cleaned)
+        // Runs LAST, after all markdown structure (* _ # | ` [ ] > …) has been
+        // consumed, so only content symbols remain to sanitize.
+        return sanitizeSymbols(in: cleaned)
+    }
+
+    /// A handful of symbols that read naturally as a word between other words.
+    private static let symbolWords: [Character: String] = [
+        "&": " and ",
+        "=": " equals ",
+        "+": " plus ",
+        "%": " percent ",
+        "@": " at ",
+        "\u{00D7}": " times ",       // ×
+        "\u{00F7}": " divided by ",  // ÷
+        "\u{00B0}": " degrees ",     // °
+    ]
+
+    /// Punctuation the phonemizer handles correctly (pauses, intonation,
+    /// contractions, and the quotes Dramatize relies on) - kept as-is.
+    private static let spokenPunctuation: Set<Character> = [
+        ".", ",", "!", "?", ";", ":",
+        "'", "\u{2019}", "\u{2018}",                       // ' ’ ‘
+        "\"", "\u{201C}", "\u{201D}",                      // " “ ”
+        "(", ")", "-", "\u{2013}", "\u{2014}", "\u{2026}", // - – — …
+    ]
+
+    /// Map the common symbols to words and drop every other non-alphanumeric
+    /// glyph (arrows, bullets, math signs, box-drawing, emoji, …) to a space.
+    /// Without this, the G2P voices an unknown glyph as a stray "x" (the /x/
+    /// velar fricative it falls back to). Letters/numbers (incl. accented and
+    /// non-Latin) and the spoken-punctuation set are preserved.
+    private static func sanitizeSymbols(in text: String) -> String {
+        var output = ""
+        output.reserveCapacity(text.count)
+        for character in text {
+            if let word = symbolWords[character] {
+                output.append(word)
+            } else if character.isLetter
+                || character.isNumber
+                || character.isWhitespace
+                || spokenPunctuation.contains(character) {
+                output.append(character)
+            } else {
+                output.append(" ")
+            }
+        }
+        return output
     }
 
     private static func replaceFencedCodeBlocks(in text: String) -> String {
