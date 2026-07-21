@@ -4,6 +4,12 @@ import PDFKit
 import UniformTypeIdentifiers
 
 enum FileTextExtractor {
+    static func supports(_ url: URL) -> Bool {
+        guard url.isFileURL else { return false }
+        return ["txt", "text", "md", "markdown", "rtf", "pdf"]
+            .contains(url.pathExtension.lowercased())
+    }
+
     static let supportedTypes: [UTType] = {
         var types: [UTType] = [.plainText]
         if let markdown = UTType(filenameExtension: "md") {

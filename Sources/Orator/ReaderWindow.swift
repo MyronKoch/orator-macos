@@ -34,6 +34,8 @@ private final class ReaderTextView: NSTextView {
 final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     ReaderTextViewInteractionDelegate
 {
+    var onFilesDropped: (([URL]) -> Void)?
+
     private let session: ReaderSession
     private let scrollView = NSScrollView()
     private let textView = ReaderTextView(frame: .zero)
@@ -108,7 +110,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func configureContent(in window: NSWindow) {
-        let contentView = NSView()
+        let contentView = FileDropTargetView()
+        contentView.onDrop = { [weak self] urls in
+            self?.onFilesDropped?(urls)
+        }
         window.contentView = contentView
 
         configureTextView()
