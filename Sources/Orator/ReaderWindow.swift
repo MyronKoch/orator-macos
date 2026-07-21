@@ -373,9 +373,21 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         wordRect.origin.y += origin.y
 
         let safeVisibleRect = textView.visibleRect.insetBy(dx: 0, dy: 60)
-        if wordRect.minY < safeVisibleRect.minY || wordRect.maxY > safeVisibleRect.maxY {
-            textView.scrollRangeToVisible(characterRange)
+        guard wordRect.minY < safeVisibleRect.minY || wordRect.maxY > safeVisibleRect.maxY else { return }
+
+        // Smoothly scroll so the current line sits ~38% down — animated (no snap)
+        // and with room to read ahead, so the next few words don't re-trigger it.
+        let clipView = scrollView.contentView
+        let viewHeight = clipView.bounds.height
+        let maxY = max(0, textView.bounds.height - viewHeight)
+        let targetY = min(max(wordRect.midY - viewHeight * 0.38, 0), maxY)
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.45
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            clipView.animator().setBoundsOrigin(NSPoint(x: clipView.bounds.origin.x, y: targetY))
         }
+        scrollView.reflectScrolledClipView(clipView)
     }
 
     @objc private func userDidScroll(_ notification: Notification) {
