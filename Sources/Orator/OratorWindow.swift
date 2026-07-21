@@ -4,6 +4,7 @@ enum OratorTab: Int, CaseIterable {
     case dashboard
     case voices
     case pronunciations
+    case replacements
     case shortcuts
     case general
 
@@ -12,6 +13,7 @@ enum OratorTab: Int, CaseIterable {
         case .dashboard: return "Dashboard"
         case .voices: return "Voices"
         case .pronunciations: return "Pronunciations"
+        case .replacements: return "Replacements"
         case .shortcuts: return "Shortcuts"
         case .general: return "General"
         }
@@ -22,6 +24,7 @@ enum OratorTab: Int, CaseIterable {
         case .dashboard: return "chart.bar.xaxis"
         case .voices: return "waveform"
         case .pronunciations: return "text.book.closed"
+        case .replacements: return "arrow.left.arrow.right"
         case .shortcuts: return "keyboard"
         case .general: return "gearshape"
         }
@@ -44,6 +47,7 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
     private lazy var pronunciationsController = PronunciationsSettingsViewController(
         appDelegate: appDelegate
     )
+    private lazy var replacementsController = ReplacementsSettingsViewController()
     private lazy var shortcutsController = ShortcutsSettingsViewController(
         appDelegate: appDelegate
     )
@@ -240,6 +244,7 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
         case .dashboard: return dashboardController
         case .voices: return voicesController
         case .pronunciations: return pronunciationsController
+        case .replacements: return replacementsController
         case .shortcuts: return shortcutsController
         case .general: return generalController
         }
@@ -265,6 +270,7 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
         case .dashboard: dashboardController.refresh()
         case .voices: voicesController.refresh()
         case .pronunciations: pronunciationsController.refresh()
+        case .replacements: replacementsController.refresh()
         case .shortcuts: shortcutsController.refresh()
         case .general: generalController.refresh()
         }
@@ -354,6 +360,253 @@ private final class PronunciationsSettingsViewController: NSViewController {
 
     func refresh() {
         appDelegate.refreshPronunciationsEditor()
+    }
+}
+
+@MainActor
+private final class ReplacementsSettingsViewController: NSViewController,
+    NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate
+{
+    private enum Column {
+        static let enabled = NSUserInterfaceItemIdentifier("ReplacementEnabled")
+        static let find = NSUserInterfaceItemIdentifier("ReplacementFind")
+        static let replace = NSUserInterfaceItemIdentifier("ReplacementReplace")
+        static let regex = NSUserInterfaceItemIdentifier("ReplacementRegex")
+    }
+
+    private let tableView = NSTableView()
+    private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
+    private let moveUpButton = NSButton(title: "Move Up", target: nil, action: nil)
+    private let moveDownButton = NSButton(title: "Move Down", target: nil, action: nil)
+    private let testInput = NSTextField()
+    private let testOutput = NSTextField(wrappingLabelWithString: "")
+    private var rules: [UserReplacements.Rule] = []
+
+    override func loadView() {
+        let content = NSStackView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 12
+
+        let heading = NSTextField(labelWithString: "Replacements")
+        heading.font = .systemFont(ofSize: 26, weight: .bold)
+        let explainer = NSTextField(
+            wrappingLabelWithString: "Rewrite symbols, abbreviations, or phrases before reading (supports regex). For how to pronounce a word, use Pronunciations."
+        )
+        explainer.font = .systemFont(ofSize: 13)
+        explainer.textColor = .secondaryLabelColor
+
+        configureTable()
+        let tableScroll = NSScrollView()
+        tableScroll.translatesAutoresizingMaskIntoConstraints = false
+        tableScroll.hasVerticalScroller = true
+        tableScroll.borderType = .bezelBorder
+        tableScroll.documentView = tableView
+
+        let addButton = NSButton(title: "Add", target: self, action: #selector(addRule))
+        removeButton.target = self
+        removeButton.action = #selector(removeRule)
+        moveUpButton.target = self
+        moveUpButton.action = #selector(moveRuleUp)
+        moveDownButton.target = self
+        moveDownButton.action = #selector(moveRuleDown)
+        let buttonRow = NSStackView(views: [addButton, removeButton, moveUpButton, moveDownButton])
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+
+        let testLabel = NSTextField(labelWithString: "Test")
+        testLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        testInput.placeholderString = "Type sample text"
+        testInput.delegate = self
+        testOutput.textColor = .secondaryLabelColor
+        testOutput.font = .systemFont(ofSize: 12)
+
+        content.addArrangedSubview(heading)
+        content.addArrangedSubview(explainer)
+        content.addArrangedSubview(tableScroll)
+        content.addArrangedSubview(buttonRow)
+        content.setCustomSpacing(20, after: buttonRow)
+        content.addArrangedSubview(testLabel)
+        content.addArrangedSubview(testInput)
+        content.addArrangedSubview(testOutput)
+
+        explainer.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        tableScroll.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        tableScroll.heightAnchor.constraint(equalToConstant: 260).isActive = true
+        testInput.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        testOutput.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+
+        view = makeSettingsScrollView(
+            hosting: content,
+            insets: NSEdgeInsets(top: 24, left: 26, bottom: 28, right: 26)
+        )
+        refresh()
+    }
+
+    func refresh() {
+        guard isViewLoaded else { return }
+        rules = UserReplacements.shared.rules
+        tableView.reloadData()
+        updateControls()
+        updateTestOutput()
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { rules.count }
+
+    func tableView(
+        _ tableView: NSTableView,
+        viewFor tableColumn: NSTableColumn?,
+        row: Int
+    ) -> NSView? {
+        guard rules.indices.contains(row), let identifier = tableColumn?.identifier else { return nil }
+        let rule = rules[row]
+        if identifier == Column.enabled || identifier == Column.regex {
+            let button = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleRule(_:)))
+            button.identifier = identifier
+            button.tag = row
+            button.state = (identifier == Column.enabled ? rule.enabled : rule.isRegex) ? .on : .off
+            return button
+        }
+
+        let field = NSTextField()
+        field.identifier = identifier
+        field.tag = row
+        field.isBordered = false
+        field.drawsBackground = false
+        field.lineBreakMode = .byTruncatingTail
+        field.delegate = self
+        field.stringValue = identifier == Column.find ? rule.find : rule.replace
+        field.textColor = identifier == Column.find && isInvalidRegex(rule)
+            ? .systemRed
+            : .labelColor
+        return field
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateControls()
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField else { return }
+        if field === testInput {
+            updateTestOutput()
+            return
+        }
+        guard rules.indices.contains(field.tag) else { return }
+        if field.identifier == Column.find {
+            rules[field.tag].find = field.stringValue
+            field.textColor = isInvalidRegex(rules[field.tag]) ? .systemRed : .labelColor
+        } else if field.identifier == Column.replace {
+            rules[field.tag].replace = field.stringValue
+        } else {
+            return
+        }
+        saveRules()
+    }
+
+    private func configureTable() {
+        tableView.headerView = NSTableHeaderView()
+        tableView.rowHeight = 25
+        tableView.usesAlternatingRowBackgroundColors = true
+        tableView.allowsMultipleSelection = false
+        tableView.dataSource = self
+        tableView.delegate = self
+
+        let columns: [(NSUserInterfaceItemIdentifier, String, CGFloat)] = [
+            (Column.enabled, "Enabled", 62),
+            (Column.find, "Find", 150),
+            (Column.replace, "Replace", 150),
+            (Column.regex, "Regex", 52),
+        ]
+        for (identifier, title, width) in columns {
+            let column = NSTableColumn(identifier: identifier)
+            column.title = title
+            column.width = width
+            column.minWidth = identifier == Column.find || identifier == Column.replace ? 80 : width
+            column.resizingMask = identifier == Column.find || identifier == Column.replace
+                ? .autoresizingMask
+                : .userResizingMask
+            tableView.addTableColumn(column)
+        }
+    }
+
+    private func isInvalidRegex(_ rule: UserReplacements.Rule) -> Bool {
+        rule.isRegex && !UserReplacements.isValidRegex(rule.find)
+    }
+
+    private func saveRules() {
+        UserReplacements.shared.setRules(rules)
+        updateTestOutput()
+    }
+
+    private func updateTestOutput() {
+        let sample = testInput.stringValue
+        testOutput.stringValue = sample.isEmpty
+            ? ""
+            : "Result: \(UserReplacements.shared.apply(to: sample))"
+    }
+
+    private func updateControls() {
+        let row = tableView.selectedRow
+        let hasSelection = rules.indices.contains(row)
+        removeButton.isEnabled = hasSelection
+        moveUpButton.isEnabled = hasSelection && row > 0
+        moveDownButton.isEnabled = hasSelection && row < rules.count - 1
+    }
+
+    private func selectRow(_ row: Int) {
+        tableView.reloadData()
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        tableView.scrollRowToVisible(row)
+        updateControls()
+    }
+
+    @objc private func toggleRule(_ sender: NSButton) {
+        guard rules.indices.contains(sender.tag) else { return }
+        if sender.identifier == Column.enabled {
+            rules[sender.tag].enabled = sender.state == .on
+        } else {
+            rules[sender.tag].isRegex = sender.state == .on
+            tableView.reloadData(forRowIndexes: IndexSet(integer: sender.tag), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
+        }
+        saveRules()
+    }
+
+    @objc private func addRule() {
+        rules.append(UserReplacements.Rule(find: "", replace: ""))
+        saveRules()
+        selectRow(rules.count - 1)
+    }
+
+    @objc private func removeRule() {
+        let row = tableView.selectedRow
+        guard rules.indices.contains(row) else { return }
+        rules.remove(at: row)
+        saveRules()
+        tableView.reloadData()
+        if !rules.isEmpty {
+            let nextRow = min(row, rules.count - 1)
+            tableView.selectRowIndexes(IndexSet(integer: nextRow), byExtendingSelection: false)
+        }
+        updateControls()
+    }
+
+    @objc private func moveRuleUp() {
+        moveSelectedRule(by: -1)
+    }
+
+    @objc private func moveRuleDown() {
+        moveSelectedRule(by: 1)
+    }
+
+    private func moveSelectedRule(by offset: Int) {
+        let row = tableView.selectedRow
+        let destination = row + offset
+        guard rules.indices.contains(row), rules.indices.contains(destination) else { return }
+        rules.swapAt(row, destination)
+        saveRules()
+        selectRow(destination)
     }
 }
 

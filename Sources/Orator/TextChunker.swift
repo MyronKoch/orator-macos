@@ -18,6 +18,7 @@ enum TextChunker {
     /// is collapsed and word pronunciations applied.
     static func chunk(_ raw: String) -> [String] {
         var text = ReadableText.markdownClean(raw)
+        text = UserReplacements.shared.apply(to: text)
         text = TextExpansions.apply(to: text)
         text = ReadableText.sanitizeSymbols(text)
         text = normalize(text)
