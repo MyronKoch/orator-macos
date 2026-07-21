@@ -13,8 +13,18 @@ enum TextExpansions {
         guard !text.isEmpty else { return text }
         var result = expandRates(in: text)   // "$15/mo" -> "$15 per month"
         result = expandCurrency(in: result)  // "$15"    -> "15 dollars"
+        result = expandSlash(in: result)     // "and/or" -> "and slash or"
         result = expandNumbers(in: result)   // "15"     -> "fifteen"
         return result
+    }
+
+    // MARK: - Slash
+
+    private static func expandSlash(in text: String) -> String {
+        // A "/" between two word/number characters reads as "slash" (and/or,
+        // km/h, 12/25). Rate abbreviations were already consumed above, and bare
+        // URLs were turned into "link" earlier, so this only hits real content.
+        replace(pattern: "(?<=[\\p{L}\\p{N}])/(?=[\\p{L}\\p{N}])", in: text) { _ in " slash " }
     }
 
     // MARK: - Rates
