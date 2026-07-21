@@ -27,3 +27,23 @@ Promote an item to a numbered PRD in `docs/prds/` when it's ready to build.
   numbers/dates, abbreviations, emoji. Fixes probably live in `normalize`/`ReadableText`, not
   the engine. Cheap-if-narrow; unbounded if we chase every edge case — so drive it from real
   reported strings, not speculation.
+
+### R3 — Smarter voice-fit for Dramatized reading ("cast the right voice for the quote")
+**Status:** phased; partially exists. **Priority:** medium (a "wow" differentiator).
+- Today `DialogueCaster` already does **gender-aware** assignment (picks a gendered voice from
+  cues in the narration). The ask: pick the voice that best *fits* the character/quote, not just
+  a round-robin by gender.
+- **This is NOT out of reach — there's a 100%-local path, in two phases:**
+  - **Phase A (cheap, heuristic, extends the existing caster):** widen the cue detection beyond
+    gender — age ("old man", "the child"), delivery ("boomed", "whispered", "hissed"), and role —
+    then map to the closest voice in the palette. Brittle but free and fully on-device. Incremental.
+  - **Phase B (the real "wow", local LLM as a casting director):** feed the passage to a *local*
+    model (the user already runs LM Studio) to profile each speaker and assign the best-fit voice.
+    Fully private/on-device if it uses a bundled or local model — honors the no-cloud rule.
+- **Two hard gates before Phase B is worth it:**
+  1. **Voice palette size.** With ~26 English Kokoro voices, "best fit" is coarse. Casting quality
+     is capped by voice variety → **PRD 21 (more voices/languages) is the prerequisite.**
+  2. **Shippability.** Relying on the user's own LM Studio isn't shippable to other users; a bundled
+     small model adds weight. Decide the model-delivery story before committing.
+- **Verdict:** not a stretch too far — a phased, on-device path exists. Do Phase A opportunistically;
+  Phase B after the voice palette grows (PRD 21). Not part of the v1.3.0 dramatize work.
