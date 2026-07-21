@@ -48,6 +48,144 @@ enum TextChunker {
         return chunks
     }
 
+    /// A speakable chunk plus the range it occupies in the FORMATTED display
+    /// string (source line breaks preserved). Lets the Reader show the source
+    /// layout while playing correct (transformed) speech.
+    struct DisplayChunk {
+        let displayRange: NSRange
+        let spoken: String
+    }
+
+    /// Produce a formatted display string (markdown structure stripped but line
+    /// breaks/paragraphs kept) plus per-chunk spoken text and each chunk's range
+    /// in that display string. Splitting happens on the DISPLAY first (so ranges
+    /// are exact), then each unit is transformed for speech per-sentence.
+    static func readerChunks(_ raw: String) -> (display: String, chunks: [DisplayChunk]) {
+        let display = ReadableText.markdownClean(raw)
+        guard !display.isEmpty else { return (display, []) }
+
+        var chunks: [DisplayChunk] = []
+        var pendingStart: Int?
+        var pendingEnd = 0
+        var pendingSpoken = ""
+
+        func flush() {
+            defer { pendingStart = nil; pendingSpoken = "" }
+            guard let start = pendingStart, !pendingSpoken.isEmpty else { return }
+            chunks.append(DisplayChunk(
+                displayRange: NSRange(location: start, length: pendingEnd - start),
+                spoken: pendingSpoken
+            ))
+        }
+
+        for unit in sentenceUnits(in: display) {
+            let spoken = speechTransform(unit.text)
+            let unitEnd = unit.range.location + unit.range.length
+            if spoken.isEmpty {
+                // Display-only text (e.g. a line of symbols): keep it visible by
+                // extending the current chunk's highlight range to cover it.
+                if pendingStart != nil { pendingEnd = unitEnd }
+                continue
+            }
+            if spoken.count > maxChunkLength {
+                flush()
+                chunks.append(contentsOf: splitLongUnit(unit.range, unit.text, in: display))
+                continue
+            }
+            if pendingStart == nil {
+                pendingStart = unit.range.location
+                pendingSpoken = spoken
+                pendingEnd = unitEnd
+            } else if pendingSpoken.count + 1 + spoken.count <= maxChunkLength {
+                pendingSpoken += " " + spoken
+                pendingEnd = unitEnd
+            } else {
+                flush()
+                pendingStart = unit.range.location
+                pendingSpoken = spoken
+                pendingEnd = unitEnd
+            }
+        }
+        flush()
+        return (display, chunks)
+    }
+
+    /// The per-sentence speech transform (everything after markdownClean, which
+    /// readerChunks already applied to the whole document).
+    private static func speechTransform(_ text: String) -> String {
+        var result = UserReplacements.shared.apply(to: text)
+        result = TextExpansions.apply(to: result)
+        result = ReadableText.sanitizeSymbols(result)
+        result = normalize(result)
+        result = Pronunciations.shared.apply(to: result)
+        return result
+    }
+
+    /// Split text into sentence units, each with its NSRange in `text`.
+    private static func sentenceUnits(in text: String) -> [(range: NSRange, text: String)] {
+        var units: [(NSRange, String)] = []
+        var start = text.startIndex
+        var index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            let character = text[index]
+            if character == "." || character == "!" || character == "?" || character == ";" {
+                appendUnit(text, start..<next, to: &units)
+                start = next
+            }
+            index = next
+        }
+        if start < text.endIndex { appendUnit(text, start..<text.endIndex, to: &units) }
+        return units
+    }
+
+    private static func appendUnit(
+        _ text: String,
+        _ range: Range<String.Index>,
+        to units: inout [(NSRange, String)]
+    ) {
+        let substring = String(text[range])
+        guard substring.contains(where: { !$0.isWhitespace }) else { return }
+        units.append((NSRange(range, in: text), substring))
+    }
+
+    /// Word-split an over-long unit into <= maxChunkLength display slices, each
+    /// carrying its own display sub-range (offset into the whole display string).
+    private static func splitLongUnit(_ range: NSRange, _ text: String, in display: String) -> [DisplayChunk] {
+        var result: [DisplayChunk] = []
+        var sliceStart = text.startIndex
+        var lastSpace: String.Index?
+        var index = text.startIndex
+
+        func emit(_ end: String.Index) {
+            guard sliceStart < end else { sliceStart = end; return }
+            let spoken = speechTransform(String(text[sliceStart..<end]))
+            if !spoken.isEmpty {
+                let local = NSRange(sliceStart..<end, in: text)
+                result.append(DisplayChunk(
+                    displayRange: NSRange(location: range.location + local.location, length: local.length),
+                    spoken: spoken
+                ))
+            }
+            sliceStart = end
+        }
+
+        while index < text.endIndex {
+            if text[index] == " " { lastSpace = index }
+            let next = text.index(after: index)
+            if text.distance(from: sliceStart, to: next) >= maxChunkLength {
+                let breakPoint = (lastSpace.flatMap { $0 > sliceStart ? text.index(after: $0) : nil }) ?? next
+                emit(breakPoint)
+                lastSpace = nil
+                index = breakPoint
+            } else {
+                index = next
+            }
+        }
+        if sliceStart < text.endIndex { emit(text.endIndex) }
+        return result
+    }
+
     /// Collapse all whitespace (newlines, tabs, repeated spaces) into single spaces.
     static func normalize(_ raw: String) -> String {
         raw.components(separatedBy: .whitespacesAndNewlines)

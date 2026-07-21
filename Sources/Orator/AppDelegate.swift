@@ -1168,9 +1168,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ) -> ReaderWindowController {
         let controller = ReaderWindowController(timeline: timeline, engine: engine)
         controller.onFilesDropped = { [weak self] urls in
-            self?.readFiles(urls)
+            self?.readFilesInReader(urls)
         }
         return controller
+    }
+
+    /// Drop INTO the Reader window: show the first file's text with source
+    /// formatting (line breaks preserved) and start reading it. Distinct from
+    /// the icon/Services path (`readFiles`), which does a plain timeline read.
+    func readFilesInReader(_ urls: [URL]) {
+        let supported = urls.filter(FileTextExtractor.supports)
+        guard let first = supported.first else {
+            showNotification(
+                "Couldn’t read file",
+                body: "Choose a PDF, plain-text, Markdown, or RTF file."
+            )
+            return
+        }
+        statusItem.button?.toolTip = "Extracting \(first.lastPathComponent)…"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let extracted = try? FileTextExtractor.extractText(from: first)
+            DispatchQueue.main.async {
+                guard let self, let engine = self.engine, let timeline = self.timeline else { return }
+                self.statusItem.button?.toolTip = nil
+                guard let text = extracted, !text.isEmpty else {
+                    self.showNotification("Couldn’t read file", body: first.lastPathComponent)
+                    return
+                }
+                self.recordHistory(text)
+                if self.readerWindowController == nil {
+                    self.readerWindowController = self.makeReaderWindowController(
+                        timeline: timeline,
+                        engine: engine
+                    )
+                }
+                self.readerWindowController?.present(text: text, autoplay: true)
+            }
+        }
     }
 
     @objc private func readFile() {
