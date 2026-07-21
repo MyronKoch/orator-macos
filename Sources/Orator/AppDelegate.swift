@@ -3,6 +3,10 @@ import AVFoundation
 import ServiceManagement
 import UniformTypeIdentifiers
 
+extension Notification.Name {
+    static let oratorAutoCastChanged = Notification.Name("OratorAutoCastChanged")
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
@@ -44,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         static let voice = "voice"
         static let speed = "speed"
         static let autoCast = "autoCast"
+        static let castGender = "castGender"
         static let continuousReading = "continuousReading"
         static let rememberHistory = "rememberHistory"
         static let hotkeyKeyCode = "hotkeyKeyCode"
@@ -55,6 +60,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         static let hotkeyQueueKeyCode = "hotkeyQueueKeyCode"
         static let hotkeyQueueModifiers = "hotkeyQueueModifiers"
         static let hotkeyQueueDisplay = "hotkeyQueueDisplay"
+        static let hotkeyDramatizeKeyCode = "hotkeyDramatizeKeyCode"
+        static let hotkeyDramatizeModifiers = "hotkeyDramatizeModifiers"
+        static let hotkeyDramatizeDisplay = "hotkeyDramatizeDisplay"
     }
     private static let speedOptions: [Float] = [0.8, 0.9, 1.0, 1.1, 1.25, 1.5]
 
@@ -203,6 +211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case .speak: self?.toggleSpeech()
                 case .pause: self?.togglePauseResume()
                 case .queue: self?.queueSelection()
+                case .dramatize: self?.toggleAutoCast()
                 }
             }
         }
@@ -238,6 +247,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 keyCode: Pref.hotkeyQueueKeyCode,
                 modifiers: Pref.hotkeyQueueModifiers,
                 display: Pref.hotkeyQueueDisplay
+            ),
+            .dramatize: .init(
+                keyCode: Pref.hotkeyDramatizeKeyCode,
+                modifiers: Pref.hotkeyDramatizeModifiers,
+                display: Pref.hotkeyDramatizeDisplay
             ),
         ]
     }
@@ -339,10 +353,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timeline: SpeechTimeline
     ) throws {
         if defaults.bool(forKey: Pref.autoCast) {
+            let castGender = DialogueCaster.CastGender(
+                rawValue: defaults.string(forKey: Pref.castGender) ?? "auto"
+            ) ?? .auto
             let segments = DialogueCaster.cast(
                 text: text,
                 narratorVoice: engine.currentVoice,
-                pool: engine.voiceNames
+                pool: engine.voiceNames,
+                castGender: castGender
             )
             try timeline.speak(segments: segments)
         } else {
@@ -373,6 +391,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Orator window settings bridge
 
     var availableVoiceNames: [String] { engine?.voiceNames ?? [] }
+    var autoCastEnabled: Bool { defaults.bool(forKey: Pref.autoCast) }
+    var castGender: String { defaults.string(forKey: Pref.castGender) ?? "auto" }
+    func setCastGender(_ rawValue: String) {
+        defaults.set(rawValue, forKey: Pref.castGender)
+    }
     var selectedVoiceName: String { engine?.currentVoice ?? defaults.string(forKey: Pref.voice) ?? "af_heart" }
     var selectedSpeed: Float {
         if let engine { return engine.speed }
@@ -770,6 +793,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        let autoCast = NSMenuItem(
+            title: "Dramatized reading",
+            action: #selector(toggleAutoCast),
+            keyEquivalent: ""
+        )
+        autoCast.target = self
+        autoCast.state = defaults.bool(forKey: Pref.autoCast) ? .on : .off
+        menu.addItem(autoCast)
+        menu.addItem(.separator())
+
         let snapshot = statsSnapshot
         let teaserItem = NSMenuItem()
         let teaser = MenuStatsTeaser(
@@ -849,8 +882,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleAutoCast() {
-        defaults.set(!defaults.bool(forKey: Pref.autoCast), forKey: Pref.autoCast)
+        setAutoCast(!defaults.bool(forKey: Pref.autoCast))
+    }
+
+    func setAutoCast(_ enabled: Bool) {
+        defaults.set(enabled, forKey: Pref.autoCast)
         rebuildMenu()
+        NotificationCenter.default.post(name: .oratorAutoCastChanged, object: nil)
     }
 
     @objc private func openPronunciations() {

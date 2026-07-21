@@ -4,6 +4,7 @@ enum OratorTab: Int, CaseIterable {
     case dashboard
     case voices
     case pronunciations
+    case replacements
     case shortcuts
     case general
 
@@ -12,6 +13,7 @@ enum OratorTab: Int, CaseIterable {
         case .dashboard: return "Dashboard"
         case .voices: return "Voices"
         case .pronunciations: return "Pronunciations"
+        case .replacements: return "Replacements"
         case .shortcuts: return "Shortcuts"
         case .general: return "General"
         }
@@ -22,6 +24,7 @@ enum OratorTab: Int, CaseIterable {
         case .dashboard: return "chart.bar.xaxis"
         case .voices: return "waveform"
         case .pronunciations: return "text.book.closed"
+        case .replacements: return "arrow.left.arrow.right"
         case .shortcuts: return "keyboard"
         case .general: return "gearshape"
         }
@@ -44,6 +47,7 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
     private lazy var pronunciationsController = PronunciationsSettingsViewController(
         appDelegate: appDelegate
     )
+    private lazy var replacementsController = ReplacementsSettingsViewController()
     private lazy var shortcutsController = ShortcutsSettingsViewController(
         appDelegate: appDelegate
     )
@@ -240,6 +244,7 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
         case .dashboard: return dashboardController
         case .voices: return voicesController
         case .pronunciations: return pronunciationsController
+        case .replacements: return replacementsController
         case .shortcuts: return shortcutsController
         case .general: return generalController
         }
@@ -265,6 +270,7 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
         case .dashboard: dashboardController.refresh()
         case .voices: voicesController.refresh()
         case .pronunciations: pronunciationsController.refresh()
+        case .replacements: replacementsController.refresh()
         case .shortcuts: shortcutsController.refresh()
         case .general: generalController.refresh()
         }
@@ -358,6 +364,256 @@ private final class PronunciationsSettingsViewController: NSViewController {
 }
 
 @MainActor
+private final class ReplacementsSettingsViewController: NSViewController,
+    NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate
+{
+    private enum Column {
+        static let enabled = NSUserInterfaceItemIdentifier("ReplacementEnabled")
+        static let find = NSUserInterfaceItemIdentifier("ReplacementFind")
+        static let replace = NSUserInterfaceItemIdentifier("ReplacementReplace")
+        static let regex = NSUserInterfaceItemIdentifier("ReplacementRegex")
+    }
+
+    private let tableView = NSTableView()
+    private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
+    private let moveUpButton = NSButton(title: "Move Up", target: nil, action: nil)
+    private let moveDownButton = NSButton(title: "Move Down", target: nil, action: nil)
+    private let testInput = NSTextField()
+    private let testOutput = NSTextField(wrappingLabelWithString: "")
+    private var rules: [UserReplacements.Rule] = []
+
+    override func loadView() {
+        let content = NSStackView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 12
+
+        let heading = NSTextField(labelWithString: "Replacements")
+        heading.font = .systemFont(ofSize: 26, weight: .bold)
+        let explainer = NSTextField(
+            wrappingLabelWithString: "Rewrite symbols, abbreviations, or phrases before reading (supports regex). For how to pronounce a word, use Pronunciations."
+        )
+        explainer.font = .systemFont(ofSize: 13)
+        explainer.textColor = .secondaryLabelColor
+
+        configureTable()
+        let tableScroll = NSScrollView()
+        tableScroll.translatesAutoresizingMaskIntoConstraints = false
+        tableScroll.hasVerticalScroller = true
+        tableScroll.borderType = .bezelBorder
+        tableScroll.documentView = tableView
+
+        let addButton = NSButton(title: "Add", target: self, action: #selector(addRule))
+        removeButton.target = self
+        removeButton.action = #selector(removeRule)
+        moveUpButton.target = self
+        moveUpButton.action = #selector(moveRuleUp)
+        moveDownButton.target = self
+        moveDownButton.action = #selector(moveRuleDown)
+        let buttonRow = NSStackView(views: [addButton, removeButton, moveUpButton, moveDownButton])
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+
+        let testLabel = NSTextField(labelWithString: "Test")
+        testLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        testInput.placeholderString = "Type sample text"
+        testInput.delegate = self
+        testOutput.textColor = .secondaryLabelColor
+        testOutput.font = .systemFont(ofSize: 12)
+
+        content.addArrangedSubview(heading)
+        content.addArrangedSubview(explainer)
+        content.addArrangedSubview(tableScroll)
+        content.addArrangedSubview(buttonRow)
+        content.setCustomSpacing(20, after: buttonRow)
+        content.addArrangedSubview(testLabel)
+        content.addArrangedSubview(testInput)
+        content.addArrangedSubview(testOutput)
+
+        explainer.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        tableScroll.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        tableScroll.heightAnchor.constraint(equalToConstant: 260).isActive = true
+        testInput.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        testOutput.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+
+        view = makeSettingsScrollView(
+            hosting: content,
+            insets: NSEdgeInsets(top: 24, left: 26, bottom: 28, right: 26)
+        )
+        refresh()
+    }
+
+    func refresh() {
+        guard isViewLoaded else { return }
+        rules = UserReplacements.shared.rules
+        tableView.reloadData()
+        updateControls()
+        updateTestOutput()
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { rules.count }
+
+    func tableView(
+        _ tableView: NSTableView,
+        viewFor tableColumn: NSTableColumn?,
+        row: Int
+    ) -> NSView? {
+        guard rules.indices.contains(row), let identifier = tableColumn?.identifier else { return nil }
+        let rule = rules[row]
+        if identifier == Column.enabled || identifier == Column.regex {
+            let button = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleRule(_:)))
+            button.identifier = identifier
+            button.tag = row
+            button.state = (identifier == Column.enabled ? rule.enabled : rule.isRegex) ? .on : .off
+            return button
+        }
+
+        let field = NSTextField()
+        field.identifier = identifier
+        field.tag = row
+        field.isEditable = true
+        field.isSelectable = true
+        field.isBordered = true
+        field.bezelStyle = .squareBezel
+        field.drawsBackground = true
+        field.lineBreakMode = .byTruncatingTail
+        field.delegate = self
+        field.stringValue = identifier == Column.find ? rule.find : rule.replace
+        field.textColor = identifier == Column.find && isInvalidRegex(rule)
+            ? .systemRed
+            : .labelColor
+        return field
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateControls()
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField else { return }
+        if field === testInput {
+            updateTestOutput()
+            return
+        }
+        guard rules.indices.contains(field.tag) else { return }
+        if field.identifier == Column.find {
+            rules[field.tag].find = field.stringValue
+            field.textColor = isInvalidRegex(rules[field.tag]) ? .systemRed : .labelColor
+        } else if field.identifier == Column.replace {
+            rules[field.tag].replace = field.stringValue
+        } else {
+            return
+        }
+        saveRules()
+    }
+
+    private func configureTable() {
+        tableView.headerView = NSTableHeaderView()
+        tableView.rowHeight = 25
+        tableView.usesAlternatingRowBackgroundColors = true
+        tableView.allowsMultipleSelection = false
+        tableView.dataSource = self
+        tableView.delegate = self
+
+        let columns: [(NSUserInterfaceItemIdentifier, String, CGFloat)] = [
+            (Column.enabled, "Enabled", 62),
+            (Column.find, "Find", 150),
+            (Column.replace, "Replace", 150),
+            (Column.regex, "Regex", 52),
+        ]
+        for (identifier, title, width) in columns {
+            let column = NSTableColumn(identifier: identifier)
+            column.title = title
+            column.width = width
+            column.minWidth = identifier == Column.find || identifier == Column.replace ? 80 : width
+            column.resizingMask = identifier == Column.find || identifier == Column.replace
+                ? .autoresizingMask
+                : .userResizingMask
+            tableView.addTableColumn(column)
+        }
+    }
+
+    private func isInvalidRegex(_ rule: UserReplacements.Rule) -> Bool {
+        rule.isRegex && !UserReplacements.isValidRegex(rule.find)
+    }
+
+    private func saveRules() {
+        UserReplacements.shared.setRules(rules)
+        updateTestOutput()
+    }
+
+    private func updateTestOutput() {
+        let sample = testInput.stringValue
+        testOutput.stringValue = sample.isEmpty
+            ? ""
+            : "Result: \(UserReplacements.shared.apply(to: sample))"
+    }
+
+    private func updateControls() {
+        let row = tableView.selectedRow
+        let hasSelection = rules.indices.contains(row)
+        removeButton.isEnabled = hasSelection
+        moveUpButton.isEnabled = hasSelection && row > 0
+        moveDownButton.isEnabled = hasSelection && row < rules.count - 1
+    }
+
+    private func selectRow(_ row: Int) {
+        tableView.reloadData()
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        tableView.scrollRowToVisible(row)
+        updateControls()
+    }
+
+    @objc private func toggleRule(_ sender: NSButton) {
+        guard rules.indices.contains(sender.tag) else { return }
+        if sender.identifier == Column.enabled {
+            rules[sender.tag].enabled = sender.state == .on
+        } else {
+            rules[sender.tag].isRegex = sender.state == .on
+            tableView.reloadData(forRowIndexes: IndexSet(integer: sender.tag), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
+        }
+        saveRules()
+    }
+
+    @objc private func addRule() {
+        rules.append(UserReplacements.Rule(find: "", replace: ""))
+        saveRules()
+        selectRow(rules.count - 1)
+    }
+
+    @objc private func removeRule() {
+        let row = tableView.selectedRow
+        guard rules.indices.contains(row) else { return }
+        rules.remove(at: row)
+        saveRules()
+        tableView.reloadData()
+        if !rules.isEmpty {
+            let nextRow = min(row, rules.count - 1)
+            tableView.selectRowIndexes(IndexSet(integer: nextRow), byExtendingSelection: false)
+        }
+        updateControls()
+    }
+
+    @objc private func moveRuleUp() {
+        moveSelectedRule(by: -1)
+    }
+
+    @objc private func moveRuleDown() {
+        moveSelectedRule(by: 1)
+    }
+
+    private func moveSelectedRule(by offset: Int) {
+        let row = tableView.selectedRow
+        let destination = row + offset
+        guard rules.indices.contains(row), rules.indices.contains(destination) else { return }
+        rules.swapAt(row, destination)
+        saveRules()
+        selectRow(destination)
+    }
+}
+
+@MainActor
 private final class ShortcutsSettingsViewController: NSViewController {
     private unowned let appDelegate: AppDelegate
 
@@ -388,6 +644,20 @@ private final class VoicesSettingsViewController: NSViewController {
     private unowned let appDelegate: AppDelegate
     private let voicePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let speedPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let autoCastCheckbox = NSButton(
+        checkboxWithTitle: "Dramatize dialogue", target: nil, action: nil
+    )
+    private let castGenderControl = NSSegmentedControl(
+        labels: ["Auto", "Female", "Male"],
+        trackingMode: .selectOne,
+        target: nil,
+        action: nil
+    )
+    // nonisolated(unsafe): the deinit (nonisolated) removes this observer, and
+    // NotificationCenter.removeObserver is thread-safe, so unchecked access is fine.
+    private nonisolated(unsafe) var autoCastObserver: NSObjectProtocol?
+    // Same rationale: removed in deinit; NSEvent.removeMonitor is thread-safe.
+    private nonisolated(unsafe) var voiceKeyMonitor: Any?
 
     init(appDelegate: AppDelegate) {
         self.appDelegate = appDelegate
@@ -396,6 +666,15 @@ private final class VoicesSettingsViewController: NSViewController {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        if let autoCastObserver {
+            NotificationCenter.default.removeObserver(autoCastObserver)
+        }
+        if let voiceKeyMonitor {
+            NSEvent.removeMonitor(voiceKeyMonitor)
+        }
     }
 
     override func loadView() {
@@ -412,6 +691,30 @@ private final class VoicesSettingsViewController: NSViewController {
         )
         helper.font = .systemFont(ofSize: 13)
         helper.textColor = .secondaryLabelColor
+
+        autoCastCheckbox.target = self
+        autoCastCheckbox.action = #selector(toggleAutoCast(_:))
+        let autoCastHelp = NSTextField(
+            wrappingLabelWithString: "Quoted speech is read by a different voice per speaker. Off by default."
+        )
+        autoCastHelp.font = .systemFont(ofSize: 11)
+        autoCastHelp.textColor = .secondaryLabelColor
+
+        castGenderControl.target = self
+        castGenderControl.action = #selector(changeCastGender(_:))
+        castGenderControl.segmentStyle = .rounded
+        let castGenderLabel = NSTextField(labelWithString: "Dialogue voices")
+        castGenderLabel.font = .systemFont(ofSize: 11)
+        castGenderLabel.textColor = .secondaryLabelColor
+        let castGenderRow = NSStackView(views: [castGenderLabel, castGenderControl])
+        castGenderRow.orientation = .horizontal
+        castGenderRow.alignment = .centerY
+        castGenderRow.spacing = 8
+
+        let autoCastControls = NSStackView(views: [autoCastCheckbox, autoCastHelp, castGenderRow])
+        autoCastControls.orientation = .vertical
+        autoCastControls.alignment = .leading
+        autoCastControls.spacing = 6
 
         let voiceLabel = settingLabel("Voice")
         voicePopup.target = self
@@ -460,7 +763,15 @@ private final class VoicesSettingsViewController: NSViewController {
         stack.addArrangedSubview(heading)
         stack.addArrangedSubview(helper)
         stack.setCustomSpacing(20, after: helper)
+        stack.addArrangedSubview(autoCastControls)
+        autoCastHelp.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         stack.addArrangedSubview(globalBox)
+        let auditionHint = NSTextField(
+            wrappingLabelWithString: "Tip: press [ or ] to step through voices and hear each one instantly."
+        )
+        auditionHint.font = .systemFont(ofSize: 11)
+        auditionHint.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(auditionHint)
         let perApp = appDelegate.makeAppVoiceProfilesContentView()
         perApp.translatesAutoresizingMaskIntoConstraints = false
         stack.addArrangedSubview(perApp)
@@ -471,14 +782,92 @@ private final class VoicesSettingsViewController: NSViewController {
             hosting: stack,
             insets: NSEdgeInsets(top: 24, left: 26, bottom: 28, right: 26)
         )
+        autoCastObserver = NotificationCenter.default.addObserver(
+            forName: .oratorAutoCastChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.syncAutoCastState()
+            }
+        }
+        // Audition voices from the keyboard: [ = previous, ] = next, each auto-previews.
+        // Local monitors deliver on the main thread; scoped below to when this tab is showing.
+        voiceKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            // Extract Sendable primitives here; never move the non-Sendable NSEvent
+            // across the MainActor boundary. Local monitors deliver on the main thread.
+            let characters = event.charactersIgnoringModifiers
+            let modifiers = event.modifierFlags
+            let handled = MainActor.assumeIsolated {
+                self.handleVoiceKey(characters: characters, modifiers: modifiers)
+            }
+            return handled ? nil : event
+        }
         refresh()
+    }
+
+    /// [ / ] step through the voice list and auto-preview, but only while the Voices
+    /// tab is actually on screen (display(_:) removes off-screen tabs, so voicePopup.window
+    /// is nil for other tabs) and not while editing text. Returns true if it consumed the key.
+    private func handleVoiceKey(characters: String?, modifiers: NSEvent.ModifierFlags) -> Bool {
+        guard let window = voicePopup.window, window.isKeyWindow, voicePopup.isEnabled else { return false }
+        if let editor = window.firstResponder as? NSText, editor.isFieldEditor { return false }
+        guard modifiers.intersection(.deviceIndependentFlagsMask).isEmpty else { return false }
+        switch characters {
+        case "]": stepVoice(1); return true
+        case "[": stepVoice(-1); return true
+        default: return false
+        }
+    }
+
+    /// Move the voice selection by `direction` (skipping group headers/separators),
+    /// commit it, and preview it. Wraps around the ends for fast auditioning.
+    private func stepVoice(_ direction: Int) {
+        guard let items = voicePopup.menu?.items else { return }
+        let voiceIndices = items.indices.filter { (items[$0].representedObject as? String) != nil }
+        guard !voiceIndices.isEmpty else { return }
+        let current = voicePopup.indexOfSelectedItem
+        let pos = voiceIndices.firstIndex(of: current)
+        let nextPos: Int
+        if let pos {
+            nextPos = (pos + direction + voiceIndices.count) % voiceIndices.count
+        } else {
+            nextPos = direction > 0 ? 0 : voiceIndices.count - 1
+        }
+        let targetIndex = voiceIndices[nextPos]
+        guard let voice = items[targetIndex].representedObject as? String else { return }
+        voicePopup.selectItem(at: targetIndex)
+        appDelegate.setSelectedVoice(voice)
+        appDelegate.previewVoice(voice, speed: appDelegate.selectedSpeed)
     }
 
     func refresh() {
         guard isViewLoaded else { return }
         rebuildVoiceMenu()
         rebuildSpeedMenu()
+        syncAutoCastState()
         appDelegate.refreshAppVoiceProfilesEditor()
+    }
+
+    private func syncAutoCastState() {
+        let enabled = appDelegate.autoCastEnabled
+        autoCastCheckbox.state = enabled ? .on : .off
+        switch appDelegate.castGender {
+        case "female": castGenderControl.selectedSegment = 1
+        case "male": castGenderControl.selectedSegment = 2
+        default: castGenderControl.selectedSegment = 0
+        }
+        // The gender constraint only applies while dramatizing.
+        castGenderControl.isEnabled = enabled
+    }
+
+    @objc private func changeCastGender(_ sender: NSSegmentedControl) {
+        let value: String
+        switch sender.selectedSegment {
+        case 1: value = "female"
+        case 2: value = "male"
+        default: value = "auto"
+        }
+        appDelegate.setCastGender(value)
     }
 
     private func rebuildVoiceMenu() {
@@ -566,6 +955,10 @@ private final class VoicesSettingsViewController: NSViewController {
         guard let speed = sender.selectedItem?.representedObject as? Float else { return }
         appDelegate.setSelectedSpeed(speed)
         refresh()
+    }
+
+    @objc private func toggleAutoCast(_ sender: NSButton) {
+        appDelegate.setAutoCast(sender.state == .on)
     }
 
     @objc private func previewVoice() {

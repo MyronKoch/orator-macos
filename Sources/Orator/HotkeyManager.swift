@@ -24,12 +24,14 @@ enum HotkeyAction: String, CaseIterable, Sendable {
     case speak
     case pause
     case queue
+    case dramatize
 
     var carbonID: UInt32 {
         switch self {
         case .speak: return 1
         case .pause: return 2
         case .queue: return 3
+        case .dramatize: return 4
         }
     }
 
@@ -66,6 +68,7 @@ final class HotkeyManager: @unchecked Sendable {
         .speak: Binding(keyCode: 39, modifiers: [.option]),
         .pause: Binding(keyCode: 35, modifiers: [.option]),
         .queue: Binding(keyCode: 12, modifiers: [.option]),
+        .dramatize: Binding(keyCode: nil, modifiers: [.option]),
     ]
     /// Legacy secondary chord for speak. Stays nil; custom combos come from
     /// the recorder. NEVER default this to Return (keyCode 36) - it was
