@@ -3,16 +3,17 @@ import Foundation
 /// Removes visual formatting that would otherwise be spoken aloud by TTS.
 enum ReadableText {
 
-    static func clean(_ text: String) -> String {
+    /// Strip markdown STRUCTURE (code, links, lists, tables, emphasis, URLs).
+    /// Symbol sanitizing is a SEPARATE pass (`sanitizeSymbols`) so text
+    /// expansions (numbers, currency, user replacements) can run in between -
+    /// they need to see the content symbols before those get dropped.
+    static func markdownClean(_ text: String) -> String {
         var cleaned = replaceFencedCodeBlocks(in: text)
         cleaned = replaceMarkdownLinks(in: cleaned)
         cleaned = processBlockStructure(in: cleaned)
         cleaned = cleanInlineMarkup(in: cleaned)
         cleaned = replaceBareURLs(in: cleaned)
-        cleaned = collapseParagraphBreaks(in: cleaned)
-        // Runs LAST, after all markdown structure (* _ # | ` [ ] > …) has been
-        // consumed, so only content symbols remain to sanitize.
-        return sanitizeSymbols(in: cleaned)
+        return collapseParagraphBreaks(in: cleaned)
     }
 
     /// A handful of symbols that read naturally as a word between other words.
@@ -41,7 +42,7 @@ enum ReadableText {
     /// Without this, the G2P voices an unknown glyph as a stray "x" (the /x/
     /// velar fricative it falls back to). Letters/numbers (incl. accented and
     /// non-Latin) and the spoken-punctuation set are preserved.
-    private static func sanitizeSymbols(in text: String) -> String {
+    static func sanitizeSymbols(_ text: String) -> String {
         var output = ""
         output.reserveCapacity(text.count)
         for character in text {
