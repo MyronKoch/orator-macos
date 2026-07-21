@@ -83,6 +83,13 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         presentWindow()
     }
 
+    /// Load a document into the Reader with source formatting and (optionally)
+    /// start reading it. Used by the Reader's own file-drop.
+    func present(text rawText: String, autoplay: Bool) {
+        show(text: rawText)
+        if autoplay { session.play(fromChunk: 0) }
+    }
+
     func showFollowingTimeline() {
         clearHighlight()
         session.syncFromTimeline()

@@ -70,9 +70,14 @@ final class ReaderSession {
     /// Loads a passive fallback document without disturbing shared playback.
     func load(rawText: String) {
         resetPlaybackTracking(clearCurrentChunk: true, resetPosition: true)
-        chunks = TextChunker.chunk(rawText)
-        text = chunks.joined(separator: " ")
-        chunkRanges = Self.ranges(for: chunks)
+        // Formatted display (source line breaks preserved) + per-chunk spoken
+        // text and exact display ranges. The word-highlight's literal search
+        // still finds plain words in the display; transformed tokens (numbers/
+        // symbols) simply don't highlight.
+        let document = TextChunker.readerChunks(rawText)
+        text = document.display
+        chunks = document.chunks.map { $0.spoken }
+        chunkRanges = document.chunks.map { $0.displayRange }
         setState(.idle)
         onDocumentChanged?()
         onProgressChanged?(0, nil)
