@@ -547,6 +547,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Read the current selection via the Accessibility API. Unlike the synthetic
+    /// ⌘C capture, this never posts a keystroke, so it can't trigger the system
+    /// "bonk" when nothing is selected. Returns nil if there's no selection or
+    /// the focused app doesn't expose one.
+    private func selectedTextViaAccessibility() -> String? {
+        guard AXIsProcessTrusted() else { return nil }
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef
+        ) == .success, let focusedRef else { return nil }
+        let focused = focusedRef as! AXUIElement
+        var selectedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            focused, kAXSelectedTextAttribute as CFString, &selectedRef
+        ) == .success, let text = selectedRef as? String, !text.isEmpty else { return nil }
+        return text
+    }
+
     private func savePasteboard(_ pb: NSPasteboard) -> [[NSPasteboard.PasteboardType: Data]] {
         (pb.pasteboardItems ?? []).map { item in
             var dict = [NSPasteboard.PasteboardType: Data]()
@@ -1130,36 +1149,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        captureSelectedText { [weak self] capturedText in
-            guard let self, let engine = self.engine, let timeline = self.timeline else { return }
+        // No active playback: read the current selection via Accessibility (no
+        // synthetic ⌘C, so no system beep when nothing is selected), falling
+        // back to the clipboard. The Speak hotkey still uses the ⌘C path.
+        let selection = selectedTextViaAccessibility()?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = (selection?.isEmpty == false ? selection : nil)
+            ?? NSPasteboard.general.string(forType: .string)
 
-            // Speech may have started while selection capture was in flight.
-            // Prefer the live timeline in that case and never replace it with
-            // a passive clipboard document.
-            if timeline.current != nil {
-                if self.readerWindowController == nil {
-                    self.readerWindowController = self.makeReaderWindowController(
-                        timeline: timeline,
-                        engine: engine
-                    )
-                }
-                self.readerWindowController?.showFollowingTimeline()
-                return
-            }
-
-            let selectedText = capturedText.flatMap { text in
-                text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
-            }
-            let text = selectedText ?? NSPasteboard.general.string(forType: .string)
-
-            if self.readerWindowController == nil {
-                self.readerWindowController = self.makeReaderWindowController(
-                    timeline: timeline,
-                    engine: engine
-                )
-            }
-            self.readerWindowController?.show(text: text)
+        if readerWindowController == nil {
+            readerWindowController = makeReaderWindowController(timeline: timeline, engine: engine)
         }
+        readerWindowController?.show(text: text)
     }
 
     private func makeReaderWindowController(
