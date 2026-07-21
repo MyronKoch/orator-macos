@@ -268,7 +268,7 @@ final class ScriptSettingsViewController: NSViewController,
         panel.allowsMultipleSelection = false
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
-        panel.allowedContentTypes = ["txt", "text", "md", "markdown", "fountain", "rtf"]
+        panel.allowedContentTypes = ["txt", "text", "md", "markdown", "fountain", "rtf", "pdf"]
             .compactMap { UTType(filenameExtension: $0) }
         panel.begin { [weak self] response in
             guard response == .OK, let url = panel.url, let self else { return }
