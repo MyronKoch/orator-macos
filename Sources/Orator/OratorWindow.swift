@@ -472,8 +472,11 @@ private final class ReplacementsSettingsViewController: NSViewController,
         let field = NSTextField()
         field.identifier = identifier
         field.tag = row
-        field.isBordered = false
-        field.drawsBackground = false
+        field.isEditable = true
+        field.isSelectable = true
+        field.isBordered = true
+        field.bezelStyle = .squareBezel
+        field.drawsBackground = true
         field.lineBreakMode = .byTruncatingTail
         field.delegate = self
         field.stringValue = identifier == Column.find ? rule.find : rule.replace
