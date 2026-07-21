@@ -48,6 +48,14 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     private var highlightedRange: NSRange?
     private var suppressAutoScrollUntil: TimeInterval = 0
 
+    // Reader text size (⌘+/⌘-/⌘0), persisted across sessions.
+    private static let fontSizeKey = "readerFontSize"
+    private static let defaultFontSize: CGFloat = 16
+    private var readerFontSize: CGFloat = {
+        let saved = UserDefaults.standard.double(forKey: "readerFontSize")
+        return saved >= 10 ? CGFloat(saved) : 16
+    }()
+
     init(timeline: SpeechTimeline, engine: OratorEngine) {
         session = ReaderSession(timeline: timeline, engine: engine)
         let window = NSWindow(
@@ -277,7 +285,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         paragraphStyle.paragraphSpacing = 6
         let fullRange = NSRange(location: 0, length: session.text.utf16.count)
         textView.textStorage?.setAttributes([
-            .font: NSFont.systemFont(ofSize: 16),
+            .font: NSFont.systemFont(ofSize: readerFontSize),
             .foregroundColor: NSColor.labelColor,
             .paragraphStyle: paragraphStyle,
         ], range: fullRange)
@@ -286,6 +294,28 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         textView.scrollToBeginningOfDocument(nil)
         updateProgress(elapsed: 0, chunkIndex: nil)
         updateControls()
+    }
+
+    private func applyReaderFont() {
+        guard let storage = textView.textStorage, storage.length > 0 else { return }
+        storage.addAttribute(
+            .font,
+            value: NSFont.systemFont(ofSize: readerFontSize),
+            range: NSRange(location: 0, length: storage.length)
+        )
+        // The word highlight is a temporary layout attribute; re-apply it so it
+        // survives the relayout a font change triggers.
+        if let range = highlightedRange { showHighlight(for: range) }
+    }
+
+    private func changeReaderFontSize(by delta: CGFloat) {
+        setReaderFontSize(readerFontSize + delta)
+    }
+
+    private func setReaderFontSize(_ size: CGFloat) {
+        readerFontSize = min(max(size, 10), 48)
+        UserDefaults.standard.set(Double(readerFontSize), forKey: Self.fontSizeKey)
+        applyReaderFont()
     }
 
     private func showHighlight(for range: NSRange?) {
@@ -399,6 +429,23 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
            event.charactersIgnoringModifiers?.lowercased() == "w" {
             window?.performClose(nil)
             return true
+        }
+
+        // Standard text-size shortcuts: ⌘+ / ⌘= larger, ⌘- smaller, ⌘0 reset.
+        if modifiers.contains(.command) {
+            switch event.charactersIgnoringModifiers {
+            case "=", "+":
+                changeReaderFontSize(by: 2)
+                return true
+            case "-":
+                changeReaderFontSize(by: -2)
+                return true
+            case "0":
+                setReaderFontSize(Self.defaultFontSize)
+                return true
+            default:
+                break
+            }
         }
 
         let disallowedPlaybackModifiers: NSEvent.ModifierFlags = [.command, .option, .control]
