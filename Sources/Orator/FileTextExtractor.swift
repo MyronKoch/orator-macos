@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 enum FileTextExtractor {
     static func supports(_ url: URL) -> Bool {
         guard url.isFileURL else { return false }
-        return ["txt", "text", "md", "markdown", "rtf", "pdf"]
+        return ["txt", "text", "md", "markdown", "fountain", "rtf", "pdf"]
             .contains(url.pathExtension.lowercased())
     }
 
@@ -18,6 +18,9 @@ enum FileTextExtractor {
         if let markdown = UTType(filenameExtension: "markdown") {
             types.append(markdown)
         }
+        if let fountain = UTType(filenameExtension: "fountain") {
+            types.append(fountain)
+        }
         types.append(contentsOf: [.rtf, .pdf])
         return types
     }()
@@ -26,7 +29,7 @@ enum FileTextExtractor {
         let text: String
 
         switch url.pathExtension.lowercased() {
-        case "txt", "text", "md", "markdown":
+        case "txt", "text", "md", "markdown", "fountain":
             text = try extractPlainText(from: url)
         case "rtf":
             text = try NSAttributedString(

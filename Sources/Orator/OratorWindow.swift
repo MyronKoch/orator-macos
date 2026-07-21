@@ -3,6 +3,7 @@ import Cocoa
 enum OratorTab: Int, CaseIterable {
     case dashboard
     case voices
+    case script
     case pronunciations
     case replacements
     case shortcuts
@@ -12,6 +13,7 @@ enum OratorTab: Int, CaseIterable {
         switch self {
         case .dashboard: return "Dashboard"
         case .voices: return "Voices"
+        case .script: return "Script"
         case .pronunciations: return "Pronunciations"
         case .replacements: return "Replacements"
         case .shortcuts: return "Shortcuts"
@@ -23,6 +25,7 @@ enum OratorTab: Int, CaseIterable {
         switch self {
         case .dashboard: return "chart.bar.xaxis"
         case .voices: return "waveform"
+        case .script: return "theatermasks"
         case .pronunciations: return "text.book.closed"
         case .replacements: return "arrow.left.arrow.right"
         case .shortcuts: return "keyboard"
@@ -44,6 +47,7 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
 
     private lazy var dashboardController = DashboardViewController(appDelegate: appDelegate)
     private lazy var voicesController = VoicesSettingsViewController(appDelegate: appDelegate)
+    private lazy var scriptController = ScriptSettingsViewController(appDelegate: appDelegate)
     private lazy var pronunciationsController = PronunciationsSettingsViewController(
         appDelegate: appDelegate
     )
@@ -243,6 +247,7 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
         switch tab {
         case .dashboard: return dashboardController
         case .voices: return voicesController
+        case .script: return scriptController
         case .pronunciations: return pronunciationsController
         case .replacements: return replacementsController
         case .shortcuts: return shortcutsController
@@ -269,6 +274,7 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
         switch tab {
         case .dashboard: dashboardController.refresh()
         case .voices: voicesController.refresh()
+        case .script: scriptController.refresh()
         case .pronunciations: pronunciationsController.refresh()
         case .replacements: replacementsController.refresh()
         case .shortcuts: shortcutsController.refresh()
@@ -278,7 +284,7 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
 }
 
 @MainActor
-private func makeSettingsScrollView(
+func makeSettingsScrollView(
     hosting content: NSView,
     insets: NSEdgeInsets
 ) -> NSView {

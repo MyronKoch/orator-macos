@@ -474,6 +474,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         catch { oratorLog("history speak FAILED: \(error.localizedDescription)") }
     }
 
+    /// Script mode's only playback bridge; parsing and casting stay outside the engine.
+    func speakScriptSegments(_ segments: [SpeechSegment]) throws {
+        guard let timeline else {
+            throw NSError(
+                domain: "Orator.ScriptMode",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "The speech engine is still loading"]
+            )
+        }
+        try timeline.speak(segments: segments)
+    }
+
     func makePronunciationsContentView() -> NSView {
         if pronunciationsEditor == nil {
             pronunciationsEditor = PronunciationsEditor(pronunciations: .shared)
