@@ -4,6 +4,15 @@ import Foundation
 /// consistent, region-compatible voice to each detected speaker.
 enum DialogueCaster {
 
+    /// Constrains the voices dialogue can be cast into. `.auto` uses both
+    /// genders (matching the detected speaker); `.female`/`.male` keep every
+    /// dialogue voice in one gender so short quotes don't jump across genders.
+    enum CastGender: String {
+        case auto
+        case female
+        case male
+    }
+
     private enum QuoteKind {
         case straight
         case curly
@@ -66,7 +75,8 @@ enum DialogueCaster {
     static func cast(
         text: String,
         narratorVoice: String,
-        pool: [String]
+        pool: [String],
+        castGender: CastGender = .auto
     ) -> [SpeechSegment] {
         let quoteSpans = findDialogueSpans(in: text)
         guard !quoteSpans.isEmpty else {
@@ -164,7 +174,8 @@ enum DialogueCaster {
 
         var voiceAllocator = VoiceAllocator(
             narratorVoice: narratorVoice,
-            availableVoices: pool
+            availableVoices: pool,
+            castGender: castGender
         )
         var segments: [SpeechSegment] = []
         var cursor = text.startIndex
@@ -314,7 +325,7 @@ enum DialogueCaster {
         var assigned: [String: String] = [:]
         var used: Set<String> = []
 
-        init(narratorVoice: String, availableVoices: [String]) {
+        init(narratorVoice: String, availableVoices: [String], castGender: CastGender) {
             self.narratorVoice = narratorVoice
 
             guard let region = narratorVoice.first, region == "a" || region == "b" else {
@@ -331,14 +342,22 @@ enum DialogueCaster {
             let male = compatible.filter { $0.hasPrefix(malePrefix) }.sorted()
             let female = compatible.filter { $0.hasPrefix(femalePrefix) }.sorted()
 
-            var alternated: [String] = []
-            alternated.reserveCapacity(compatible.count)
-            let count = max(male.count, female.count)
-            for index in 0..<count {
-                if male.indices.contains(index) { alternated.append(male[index]) }
-                if female.indices.contains(index) { alternated.append(female[index]) }
+            switch castGender {
+            case .female:
+                voices = female
+            case .male:
+                voices = male
+            case .auto:
+                // Interleave so distinct speakers alternate gender when possible.
+                var alternated: [String] = []
+                alternated.reserveCapacity(compatible.count)
+                let count = max(male.count, female.count)
+                for index in 0..<count {
+                    if male.indices.contains(index) { alternated.append(male[index]) }
+                    if female.indices.contains(index) { alternated.append(female[index]) }
+                }
+                voices = alternated
             }
-            voices = alternated
         }
 
         mutating func voice(for speaker: String, gender: Gender?) -> String {

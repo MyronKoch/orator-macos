@@ -391,6 +391,12 @@ private final class VoicesSettingsViewController: NSViewController {
     private let autoCastCheckbox = NSButton(
         checkboxWithTitle: "Dramatize dialogue", target: nil, action: nil
     )
+    private let castGenderControl = NSSegmentedControl(
+        labels: ["Auto", "Female", "Male"],
+        trackingMode: .selectOne,
+        target: nil,
+        action: nil
+    )
     // nonisolated(unsafe): the deinit (nonisolated) removes this observer, and
     // NotificationCenter.removeObserver is thread-safe, so unchecked access is fine.
     private nonisolated(unsafe) var autoCastObserver: NSObjectProtocol?
@@ -437,10 +443,22 @@ private final class VoicesSettingsViewController: NSViewController {
         )
         autoCastHelp.font = .systemFont(ofSize: 11)
         autoCastHelp.textColor = .secondaryLabelColor
-        let autoCastControls = NSStackView(views: [autoCastCheckbox, autoCastHelp])
+
+        castGenderControl.target = self
+        castGenderControl.action = #selector(changeCastGender(_:))
+        castGenderControl.segmentStyle = .rounded
+        let castGenderLabel = NSTextField(labelWithString: "Dialogue voices")
+        castGenderLabel.font = .systemFont(ofSize: 11)
+        castGenderLabel.textColor = .secondaryLabelColor
+        let castGenderRow = NSStackView(views: [castGenderLabel, castGenderControl])
+        castGenderRow.orientation = .horizontal
+        castGenderRow.alignment = .centerY
+        castGenderRow.spacing = 8
+
+        let autoCastControls = NSStackView(views: [autoCastCheckbox, autoCastHelp, castGenderRow])
         autoCastControls.orientation = .vertical
         autoCastControls.alignment = .leading
-        autoCastControls.spacing = 3
+        autoCastControls.spacing = 6
 
         let voiceLabel = settingLabel("Voice")
         voicePopup.target = self
@@ -575,7 +593,25 @@ private final class VoicesSettingsViewController: NSViewController {
     }
 
     private func syncAutoCastState() {
-        autoCastCheckbox.state = appDelegate.autoCastEnabled ? .on : .off
+        let enabled = appDelegate.autoCastEnabled
+        autoCastCheckbox.state = enabled ? .on : .off
+        switch appDelegate.castGender {
+        case "female": castGenderControl.selectedSegment = 1
+        case "male": castGenderControl.selectedSegment = 2
+        default: castGenderControl.selectedSegment = 0
+        }
+        // The gender constraint only applies while dramatizing.
+        castGenderControl.isEnabled = enabled
+    }
+
+    @objc private func changeCastGender(_ sender: NSSegmentedControl) {
+        let value: String
+        switch sender.selectedSegment {
+        case 1: value = "female"
+        case 2: value = "male"
+        default: value = "auto"
+        }
+        appDelegate.setCastGender(value)
     }
 
     private func rebuildVoiceMenu() {

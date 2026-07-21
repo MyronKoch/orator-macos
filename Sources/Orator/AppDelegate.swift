@@ -48,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         static let voice = "voice"
         static let speed = "speed"
         static let autoCast = "autoCast"
+        static let castGender = "castGender"
         static let continuousReading = "continuousReading"
         static let rememberHistory = "rememberHistory"
         static let hotkeyKeyCode = "hotkeyKeyCode"
@@ -352,10 +353,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timeline: SpeechTimeline
     ) throws {
         if defaults.bool(forKey: Pref.autoCast) {
+            let castGender = DialogueCaster.CastGender(
+                rawValue: defaults.string(forKey: Pref.castGender) ?? "auto"
+            ) ?? .auto
             let segments = DialogueCaster.cast(
                 text: text,
                 narratorVoice: engine.currentVoice,
-                pool: engine.voiceNames
+                pool: engine.voiceNames,
+                castGender: castGender
             )
             try timeline.speak(segments: segments)
         } else {
@@ -387,6 +392,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     var availableVoiceNames: [String] { engine?.voiceNames ?? [] }
     var autoCastEnabled: Bool { defaults.bool(forKey: Pref.autoCast) }
+    var castGender: String { defaults.string(forKey: Pref.castGender) ?? "auto" }
+    func setCastGender(_ rawValue: String) {
+        defaults.set(rawValue, forKey: Pref.castGender)
+    }
     var selectedVoiceName: String { engine?.currentVoice ?? defaults.string(forKey: Pref.voice) ?? "af_heart" }
     var selectedSpeed: Float {
         if let engine { return engine.speed }
