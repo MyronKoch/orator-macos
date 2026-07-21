@@ -10,9 +10,17 @@ enum TextChunker {
 
     static let maxChunkLength = 350
 
-    /// Normalize whitespace/newlines, then split into speakable chunks.
+    /// Clean, expand, and normalize text, then split into speakable chunks.
+    ///
+    /// Order is load-bearing: markdown structure is stripped first, THEN text
+    /// expansions (numbers/currency/rates) run while content symbols are still
+    /// present, THEN the symbol sanitizer drops anything left, THEN whitespace
+    /// is collapsed and word pronunciations applied.
     static func chunk(_ raw: String) -> [String] {
-        var text = normalize(ReadableText.clean(raw))
+        var text = ReadableText.markdownClean(raw)
+        text = TextExpansions.apply(to: text)
+        text = ReadableText.sanitizeSymbols(text)
+        text = normalize(text)
         text = Pronunciations.shared.apply(to: text)
         guard !text.isEmpty else { return [] }
 
