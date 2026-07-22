@@ -388,6 +388,13 @@ final class ReaderSession {
         onActiveWordChanged?(word?.characterRange)
     }
 
+    /// Re-apply the active-word highlight from the current position. Called when
+    /// the sync offset changes so the shift is visible immediately, not on the
+    /// next word boundary.
+    func refreshActiveWord() {
+        setActiveWord(activeWord(at: max(0, lastKnownPosition - highlightOffset)))
+    }
+
     private func setState(_ newState: State) {
         guard state != newState else { return }
         state = newState

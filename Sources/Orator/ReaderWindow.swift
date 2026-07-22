@@ -162,9 +162,9 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         // Live sync control: nudge the bouncing ball earlier/later vs the voice.
         syncLabel.font = .systemFont(ofSize: 11)
         syncLabel.textColor = .secondaryLabelColor
-        syncStepper.minValue = -0.3
-        syncStepper.maxValue = 0.8
-        syncStepper.increment = 0.02
+        syncStepper.minValue = -0.5
+        syncStepper.maxValue = 1.2
+        syncStepper.increment = 0.05
         syncStepper.valueWraps = false
         syncStepper.doubleValue = session.highlightOffset
         syncStepper.target = self
@@ -359,6 +359,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         session.highlightOffset = syncStepper.doubleValue
         UserDefaults.standard.set(session.highlightOffset, forKey: ReaderSession.highlightOffsetKey)
         updateSyncLabel()
+        session.refreshActiveWord()
     }
 
     private func updateSyncLabel() {
