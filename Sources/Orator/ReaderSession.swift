@@ -44,6 +44,11 @@ final class ReaderSession {
     private var activeWord: AlignedWord?
     private var lastKnownPosition: TimeInterval = 0
 
+    /// The player reports rendered-sample position, which runs ahead of the
+    /// audible output by the buffer/output latency. Nudge the word lookup back
+    /// so the highlight lands on the word you actually hear (tune to taste).
+    private static let highlightLatencyCompensation: TimeInterval = 0.12
+
     private(set) var text = ""
     private(set) var chunks: [String] = []
     private(set) var chunkRanges: [NSRange] = []
@@ -337,7 +342,7 @@ final class ReaderSession {
         if let chunkIndex = chunkIndex(at: lastKnownPosition), chunkIndex != currentChunkIndex {
             currentChunkIndex = chunkIndex
         }
-        setActiveWord(activeWord(at: lastKnownPosition))
+        setActiveWord(activeWord(at: max(0, lastKnownPosition - Self.highlightLatencyCompensation)))
         onProgressChanged?(lastKnownPosition, currentChunkIndex)
     }
 
