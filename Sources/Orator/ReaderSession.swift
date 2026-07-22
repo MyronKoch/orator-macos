@@ -49,7 +49,7 @@ final class ReaderSession {
     /// which leads audible output). User-adjustable from the Reader; persisted.
     static let highlightOffsetKey = "readerHighlightOffset"
     var highlightOffset: TimeInterval =
-        (UserDefaults.standard.object(forKey: "readerHighlightOffset") as? Double) ?? 0.12
+        (UserDefaults.standard.object(forKey: "readerHighlightOffset") as? Double) ?? 0.08
 
     private(set) var text = ""
     private(set) var chunks: [String] = []
