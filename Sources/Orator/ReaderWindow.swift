@@ -47,6 +47,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     private let playPauseButton = NSButton()
     private let stopButton = NSButton()
     private let forwardButton = NSButton()
+    private let syncStepper = NSStepper()
+    private let syncLabel = NSTextField(labelWithString: "")
     private var highlightedRange: NSRange?
     private var suppressAutoScrollUntil: TimeInterval = 0
 
@@ -157,13 +159,36 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         emptyMessage.maximumNumberOfLines = 0
         emptyMessage.preferredMaxLayoutWidth = 380
 
+        // Live sync control: nudge the bouncing ball earlier/later vs the voice.
+        syncLabel.font = .systemFont(ofSize: 11)
+        syncLabel.textColor = .secondaryLabelColor
+        syncStepper.minValue = -0.3
+        syncStepper.maxValue = 0.8
+        syncStepper.increment = 0.02
+        syncStepper.valueWraps = false
+        syncStepper.doubleValue = session.highlightOffset
+        syncStepper.target = self
+        syncStepper.action = #selector(syncOffsetChanged)
+        let syncStack = NSStackView(views: [syncLabel, syncStepper])
+        syncStack.translatesAutoresizingMaskIntoConstraints = false
+        syncStack.orientation = .horizontal
+        syncStack.alignment = .centerY
+        syncStack.spacing = 4
+        syncStack.toolTip = "Sync the bouncing ball to the voice (↑ later, ↓ earlier)"
+
         contentView.addSubview(scrollView)
         contentView.addSubview(controlBar)
         contentView.addSubview(emptyMessage)
         controlBar.addSubview(controls)
         controlBar.addSubview(progressLabel)
+        controlBar.addSubview(syncStack)
+        updateSyncLabel()
 
         NSLayoutConstraint.activate([
+            syncStack.leadingAnchor.constraint(equalTo: controlBar.leadingAnchor, constant: 16),
+            syncStack.centerYAnchor.constraint(equalTo: controlBar.centerYAnchor),
+            controls.leadingAnchor.constraint(greaterThanOrEqualTo: syncStack.trailingAnchor, constant: 12),
+
             scrollView.topAnchor.constraint(equalTo: contentView.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
@@ -328,6 +353,17 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         readerFontSize = min(max(size, 10), 48)
         UserDefaults.standard.set(Double(readerFontSize), forKey: Self.fontSizeKey)
         applyReaderFont()
+    }
+
+    @objc private func syncOffsetChanged() {
+        session.highlightOffset = syncStepper.doubleValue
+        UserDefaults.standard.set(session.highlightOffset, forKey: ReaderSession.highlightOffsetKey)
+        updateSyncLabel()
+    }
+
+    private func updateSyncLabel() {
+        let milliseconds = Int((session.highlightOffset * 1000).rounded())
+        syncLabel.stringValue = "Sync \(milliseconds)ms"
     }
 
     private func showHighlight(for range: NSRange?) {
