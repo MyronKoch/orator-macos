@@ -1,8 +1,22 @@
 import Foundation
 import AVFoundation
+import CoreAudio
 import KokoroSwift
 import MLX
 import MLXUtilsLibrary
+
+private func defaultOutputDeviceChanged(
+    _ objectID: AudioObjectID,
+    _ numberAddresses: UInt32,
+    _ addresses: UnsafePointer<AudioObjectPropertyAddress>,
+    _ clientData: UnsafeMutableRawPointer?
+) -> OSStatus {
+    guard let clientData else { return noErr }
+    Unmanaged<OratorEngine>.fromOpaque(clientData)
+        .takeUnretainedValue()
+        .refreshOutputLatency()
+    return noErr
+}
 
 extension Notification.Name {
     static let oratorSpeechFinished = Notification.Name("oratorSpeechFinished")
@@ -52,6 +66,9 @@ final class OratorEngine: @unchecked Sendable {
     private let audioEngine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let format: AVAudioFormat
+    private let latencyLock = NSLock()
+    private var cachedOutputLatency: TimeInterval = 0
+    private var audioConfigurationObserver: NSObjectProtocol?
 
     /// All MLX inference is serialized on this queue.
     private let synthQueue = DispatchQueue(label: "app.orator.synth", qos: .userInitiated)
@@ -101,6 +118,14 @@ final class OratorEngine: @unchecked Sendable {
               let playerTime = player.playerTime(forNodeTime: nodeTime),
               playerTime.sampleRate > 0 else { return nil }
         return max(0, Double(playerTime.sampleTime) / playerTime.sampleRate)
+    }
+
+    /// Cached delay between rendering a sample and hearing it on the current
+    /// output route. CoreAudio is queried only at startup or on route/config
+    /// changes, never from the Reader's display callback.
+    var outputLatency: TimeInterval {
+        latencyLock.lock(); defer { latencyLock.unlock() }
+        return cachedOutputLatency
     }
 
     /// True while the current utterance is paused. Cleared by speak/stop.
@@ -155,6 +180,153 @@ final class OratorEngine: @unchecked Sendable {
         )!
         audioEngine.attach(player)
         audioEngine.connect(player, to: audioEngine.mainMixerNode, format: format)
+        installOutputLatencyObservers()
+        refreshOutputLatency()
+    }
+
+    deinit {
+        if let audioConfigurationObserver {
+            NotificationCenter.default.removeObserver(audioConfigurationObserver)
+        }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListener(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            defaultOutputDeviceChanged,
+            Unmanaged.passUnretained(self).toOpaque()
+        )
+    }
+
+    private func installOutputLatencyObservers() {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectAddPropertyListener(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            defaultOutputDeviceChanged,
+            Unmanaged.passUnretained(self).toOpaque()
+        )
+
+        audioConfigurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: audioEngine,
+            queue: nil
+        ) { [weak self] _ in
+            self?.refreshOutputLatency()
+        }
+    }
+
+    fileprivate func refreshOutputLatency() {
+        let coreAudioLatency = Self.coreAudioOutputLatency()
+        // CoreAudio's device latency is the same underlying value exposed by
+        // the AVAudioEngine nodes, so combining them would count it twice.
+        // Keep the output-node value only as a fallback when CoreAudio cannot
+        // provide a hardware subtotal.
+        let measuredLatency = coreAudioLatency > 0
+            ? coreAudioLatency
+            : audioEngine.outputNode.presentationLatency
+        latencyLock.lock()
+        cachedOutputLatency = max(0, measuredLatency)
+        latencyLock.unlock()
+    }
+
+    private static func coreAudioOutputLatency() -> TimeInterval {
+        var deviceID = AudioDeviceID(kAudioObjectUnknown)
+        var deviceIDSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var defaultDeviceAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &defaultDeviceAddress,
+            0,
+            nil,
+            &deviceIDSize,
+            &deviceID
+        ) == noErr, deviceID != kAudioObjectUnknown else {
+            return 0
+        }
+
+        var sampleRate = Float64(0)
+        var sampleRateSize = UInt32(MemoryLayout<Float64>.size)
+        var sampleRateAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(
+            deviceID,
+            &sampleRateAddress,
+            0,
+            nil,
+            &sampleRateSize,
+            &sampleRate
+        ) == noErr, sampleRate > 0 else {
+            return 0
+        }
+
+        func frameCount(_ selector: AudioObjectPropertySelector) -> UInt32 {
+            var value: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            var address = AudioObjectPropertyAddress(
+                mSelector: selector,
+                mScope: kAudioDevicePropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            guard AudioObjectGetPropertyData(
+                deviceID, &address, 0, nil, &size, &value
+            ) == noErr else { return 0 }
+            return value
+        }
+
+        var streamsAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var streamsSize: UInt32 = 0
+        var streamLatency: UInt32 = 0
+        if AudioObjectGetPropertyDataSize(
+            deviceID, &streamsAddress, 0, nil, &streamsSize
+        ) == noErr, streamsSize > 0 {
+            let count = Int(streamsSize) / MemoryLayout<AudioStreamID>.size
+            var streams = [AudioStreamID](repeating: 0, count: count)
+            let streamsStatus = streams.withUnsafeMutableBytes { bytes in
+                AudioObjectGetPropertyData(
+                    deviceID, &streamsAddress, 0, nil, &streamsSize, bytes.baseAddress!
+                )
+            }
+            if streamsStatus == noErr {
+                for stream in streams {
+                    var latency: UInt32 = 0
+                    var latencySize = UInt32(MemoryLayout<UInt32>.size)
+                    var latencyAddress = AudioObjectPropertyAddress(
+                        mSelector: kAudioStreamPropertyLatency,
+                        mScope: kAudioObjectPropertyScopeGlobal,
+                        mElement: kAudioObjectPropertyElementMain
+                    )
+                    if AudioObjectGetPropertyData(
+                        stream, &latencyAddress, 0, nil, &latencySize, &latency
+                    ) == noErr {
+                        streamLatency = max(streamLatency, latency)
+                    }
+                }
+            }
+        }
+
+        let frames = frameCount(kAudioDevicePropertyLatency)
+            + frameCount(kAudioDevicePropertySafetyOffset)
+            + streamLatency
+        return TimeInterval(frames) / sampleRate
     }
 
     /// Force one tiny synthesis so the first real utterance has no warmup lag.
@@ -314,6 +486,7 @@ final class OratorEngine: @unchecked Sendable {
         player.stop()
         if !audioEngine.isRunning {
             try audioEngine.start()
+            refreshOutputLatency()
         }
         player.play()
         NotificationCenter.default.post(name: .oratorSpeechStarted, object: nil)
