@@ -49,6 +49,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     private let forwardButton = NSButton()
     private let syncStepper = NSStepper()
     private let syncLabel = NSTextField(labelWithString: "")
+    private var highlightOverlay: ReaderHighlightOverlayView!
     private var highlightedRange: NSRange?
     private var suppressAutoScrollUntil: TimeInterval = 0
 
@@ -126,6 +127,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         window.contentView = contentView
 
         configureTextView()
+        session.useDisplayLink(from: textView)
         configureControlButtons()
 
         scrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -136,6 +138,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = true
         scrollView.backgroundColor = .textBackgroundColor
+        configureHighlightOverlay()
 
         let controlBar = NSView()
         controlBar.translatesAutoresizingMaskIntoConstraints = false
@@ -166,7 +169,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         syncStepper.maxValue = 1.2
         syncStepper.increment = 0.05
         syncStepper.valueWraps = false
-        syncStepper.doubleValue = session.highlightOffset
+        syncStepper.doubleValue = session.userSyncTrim
         syncStepper.target = self
         syncStepper.action = #selector(syncOffsetChanged)
         let syncStack = NSStackView(views: [syncLabel, syncStepper])
@@ -176,18 +179,30 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         syncStack.spacing = 4
         syncStack.toolTip = "Sync the bouncing ball to the voice (↑ later, ↓ earlier)"
 
+        let readerPreferences = NSStackView(views: [syncStack])
+        readerPreferences.translatesAutoresizingMaskIntoConstraints = false
+        readerPreferences.orientation = .vertical
+        readerPreferences.alignment = .leading
+        readerPreferences.spacing = 1
+
         contentView.addSubview(scrollView)
         contentView.addSubview(controlBar)
         contentView.addSubview(emptyMessage)
         controlBar.addSubview(controls)
         controlBar.addSubview(progressLabel)
-        controlBar.addSubview(syncStack)
+        controlBar.addSubview(readerPreferences)
         updateSyncLabel()
 
         NSLayoutConstraint.activate([
-            syncStack.leadingAnchor.constraint(equalTo: controlBar.leadingAnchor, constant: 16),
-            syncStack.centerYAnchor.constraint(equalTo: controlBar.centerYAnchor),
-            controls.leadingAnchor.constraint(greaterThanOrEqualTo: syncStack.trailingAnchor, constant: 12),
+            readerPreferences.leadingAnchor.constraint(
+                equalTo: controlBar.leadingAnchor,
+                constant: 16
+            ),
+            readerPreferences.topAnchor.constraint(equalTo: controlBar.topAnchor, constant: 5),
+            readerPreferences.trailingAnchor.constraint(
+                lessThanOrEqualTo: progressLabel.leadingAnchor,
+                constant: -12
+            ),
 
             scrollView.topAnchor.constraint(equalTo: contentView.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
@@ -197,14 +212,13 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
             controlBar.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             controlBar.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             controlBar.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-            controlBar.heightAnchor.constraint(equalToConstant: 54),
+            controlBar.heightAnchor.constraint(equalToConstant: 88),
 
             controls.centerXAnchor.constraint(equalTo: controlBar.centerXAnchor),
-            controls.centerYAnchor.constraint(equalTo: controlBar.centerYAnchor),
+            controls.bottomAnchor.constraint(equalTo: controlBar.bottomAnchor, constant: -7),
 
             progressLabel.trailingAnchor.constraint(equalTo: controlBar.trailingAnchor, constant: -16),
-            progressLabel.centerYAnchor.constraint(equalTo: controlBar.centerYAnchor),
-            progressLabel.leadingAnchor.constraint(greaterThanOrEqualTo: controls.trailingAnchor, constant: 16),
+            progressLabel.topAnchor.constraint(equalTo: controlBar.topAnchor, constant: 11),
 
             emptyMessage.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
             emptyMessage.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
@@ -250,6 +264,15 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
             width: 0,
             height: CGFloat.greatestFiniteMagnitude
         )
+    }
+
+    private func configureHighlightOverlay() {
+        let clipView = scrollView.contentView
+        highlightOverlay = ReaderHighlightOverlayView(
+            textView: textView,
+            clipView: clipView
+        )
+        clipView.addSubview(highlightOverlay, positioned: .above, relativeTo: textView)
     }
 
     private func configureControlButtons() {
@@ -302,6 +325,12 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         session.onActiveWordChanged = { [weak self] range in
             self?.showHighlight(for: range)
         }
+        session.onActiveWordProgress = { [weak self] range, progress in
+            self?.highlightOverlay.updateWord(
+                characterRange: range,
+                progress: progress
+            )
+        }
         session.onStateChanged = { [weak self] _ in
             self?.updateControls()
         }
@@ -315,6 +344,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func displayDocument() {
+        highlightOverlay.clear(animated: false)
         textView.string = session.text
 
         let paragraphStyle = NSMutableParagraphStyle()
@@ -340,9 +370,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
             value: NSFont.systemFont(ofSize: readerFontSize),
             range: NSRange(location: 0, length: storage.length)
         )
-        // The word highlight is a temporary layout attribute; re-apply it so it
-        // survives the relayout a font change triggers.
-        if let range = highlightedRange { showHighlight(for: range) }
+        highlightOverlay.layoutDidChange()
     }
 
     private func changeReaderFontSize(by delta: CGFloat) {
@@ -356,41 +384,45 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     }
 
     @objc private func syncOffsetChanged() {
-        session.highlightOffset = syncStepper.doubleValue
-        UserDefaults.standard.set(session.highlightOffset, forKey: ReaderSession.highlightOffsetKey)
+        session.userSyncTrim = syncStepper.doubleValue
+        UserDefaults.standard.set(session.userSyncTrim, forKey: ReaderSession.syncTrimKey)
         updateSyncLabel()
         session.refreshActiveWord()
     }
 
     private func updateSyncLabel() {
-        let milliseconds = Int((session.highlightOffset * 1000).rounded())
-        syncLabel.stringValue = "Sync \(milliseconds)ms"
+        let trimMilliseconds = Int((session.userSyncTrim * 1000).rounded())
+        let trim = trimMilliseconds >= 0 ? "+\(trimMilliseconds)" : "\(trimMilliseconds)"
+        let autoMilliseconds = Int((session.outputLatency * 1000).rounded())
+        let modelMilliseconds = Int((ReaderSession.timestampBias * 1000).rounded())
+        syncLabel.stringValue =
+            "Sync \(trim) ms (auto \(autoMilliseconds) + model \(modelMilliseconds))"
     }
 
     private func showHighlight(for range: NSRange?) {
-        clearHighlight()
-        guard let range,
-              range.location != NSNotFound,
-              NSMaxRange(range) <= textView.string.utf16.count,
-              let layoutManager = textView.layoutManager
+        guard let range else {
+            clearHighlight()
+            return
+        }
+        guard range.location != NSNotFound,
+              NSMaxRange(range) <= textView.string.utf16.count
         else { return }
 
-        layoutManager.addTemporaryAttribute(
-            .backgroundColor,
-            value: NSColor.controlAccentColor.withAlphaComponent(0.35),
-            forCharacterRange: range
-        )
         highlightedRange = range
+        highlightOverlay.showWord(
+            characterRange: range,
+            duration: session.activeWordDuration
+        )
         scrollToHighlightedWordIfNeeded(range)
     }
 
     private func clearHighlight() {
-        guard let range = highlightedRange else { return }
-        textView.layoutManager?.removeTemporaryAttribute(
-            .backgroundColor,
-            forCharacterRange: range
-        )
         highlightedRange = nil
+        highlightOverlay?.clear(animated: true)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        highlightOverlay?.layoutDidChange()
     }
 
     private func scrollToHighlightedWordIfNeeded(_ characterRange: NSRange) {
