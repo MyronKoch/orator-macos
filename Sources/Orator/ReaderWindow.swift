@@ -34,6 +34,8 @@ private final class ReaderTextView: NSTextView {
 final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     ReaderTextViewInteractionDelegate
 {
+    var onFilesDropped: (([URL]) -> Void)?
+
     private let session: ReaderSession
     private let scrollView = NSScrollView()
     private let textView = ReaderTextView(frame: .zero)
@@ -45,8 +47,19 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     private let playPauseButton = NSButton()
     private let stopButton = NSButton()
     private let forwardButton = NSButton()
+    private let syncStepper = NSStepper()
+    private let syncLabel = NSTextField(labelWithString: "")
+    private var highlightOverlay: ReaderHighlightOverlayView!
     private var highlightedRange: NSRange?
     private var suppressAutoScrollUntil: TimeInterval = 0
+
+    // Reader text size (⌘+/⌘-/⌘0), persisted across sessions.
+    private static let fontSizeKey = "readerFontSize"
+    private static let defaultFontSize: CGFloat = 16
+    private var readerFontSize: CGFloat = {
+        let saved = UserDefaults.standard.double(forKey: "readerFontSize")
+        return saved >= 10 ? CGFloat(saved) : 16
+    }()
 
     init(timeline: SpeechTimeline, engine: OratorEngine) {
         session = ReaderSession(timeline: timeline, engine: engine)
@@ -71,6 +84,13 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         clearHighlight()
         session.load(rawText: rawText ?? "")
         presentWindow()
+    }
+
+    /// Load a document into the Reader with source formatting and (optionally)
+    /// start reading it. Used by the Reader's own file-drop.
+    func present(text rawText: String, autoplay: Bool) {
+        show(text: rawText)
+        if autoplay { session.play(fromChunk: 0) }
     }
 
     func showFollowingTimeline() {
@@ -100,10 +120,14 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func configureContent(in window: NSWindow) {
-        let contentView = NSView()
+        let contentView = FileDropTargetView()
+        contentView.onDrop = { [weak self] urls in
+            self?.onFilesDropped?(urls)
+        }
         window.contentView = contentView
 
         configureTextView()
+        session.useDisplayLink(from: textView)
         configureControlButtons()
 
         scrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -114,6 +138,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = true
         scrollView.backgroundColor = .textBackgroundColor
+        configureHighlightOverlay()
 
         let controlBar = NSView()
         controlBar.translatesAutoresizingMaskIntoConstraints = false
@@ -137,13 +162,48 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         emptyMessage.maximumNumberOfLines = 0
         emptyMessage.preferredMaxLayoutWidth = 380
 
+        // Live sync control: nudge the bouncing ball earlier/later vs the voice.
+        syncLabel.font = .systemFont(ofSize: 11)
+        syncLabel.textColor = .secondaryLabelColor
+        syncStepper.minValue = -0.5
+        syncStepper.maxValue = 1.2
+        syncStepper.increment = 0.05
+        syncStepper.valueWraps = false
+        syncStepper.doubleValue = session.userSyncTrim
+        syncStepper.target = self
+        syncStepper.action = #selector(syncOffsetChanged)
+        let syncStack = NSStackView(views: [syncLabel, syncStepper])
+        syncStack.translatesAutoresizingMaskIntoConstraints = false
+        syncStack.orientation = .horizontal
+        syncStack.alignment = .centerY
+        syncStack.spacing = 4
+        syncStack.toolTip = "Sync the bouncing ball to the voice (↑ later, ↓ earlier)"
+
+        let readerPreferences = NSStackView(views: [syncStack])
+        readerPreferences.translatesAutoresizingMaskIntoConstraints = false
+        readerPreferences.orientation = .vertical
+        readerPreferences.alignment = .leading
+        readerPreferences.spacing = 1
+
         contentView.addSubview(scrollView)
         contentView.addSubview(controlBar)
         contentView.addSubview(emptyMessage)
         controlBar.addSubview(controls)
         controlBar.addSubview(progressLabel)
+        controlBar.addSubview(readerPreferences)
+        updateSyncLabel()
 
         NSLayoutConstraint.activate([
+            readerPreferences.leadingAnchor.constraint(
+                equalTo: controlBar.leadingAnchor,
+                constant: 16
+            ),
+            readerPreferences.topAnchor.constraint(equalTo: controlBar.topAnchor, constant: 5),
+            readerPreferences.trailingAnchor.constraint(
+                lessThanOrEqualTo: progressLabel.leadingAnchor,
+                constant: -12
+            ),
+
             scrollView.topAnchor.constraint(equalTo: contentView.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
@@ -152,14 +212,13 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
             controlBar.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             controlBar.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             controlBar.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-            controlBar.heightAnchor.constraint(equalToConstant: 54),
+            controlBar.heightAnchor.constraint(equalToConstant: 88),
 
             controls.centerXAnchor.constraint(equalTo: controlBar.centerXAnchor),
-            controls.centerYAnchor.constraint(equalTo: controlBar.centerYAnchor),
+            controls.bottomAnchor.constraint(equalTo: controlBar.bottomAnchor, constant: -7),
 
             progressLabel.trailingAnchor.constraint(equalTo: controlBar.trailingAnchor, constant: -16),
-            progressLabel.centerYAnchor.constraint(equalTo: controlBar.centerYAnchor),
-            progressLabel.leadingAnchor.constraint(greaterThanOrEqualTo: controls.trailingAnchor, constant: 16),
+            progressLabel.topAnchor.constraint(equalTo: controlBar.topAnchor, constant: 11),
 
             emptyMessage.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
             emptyMessage.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
@@ -205,6 +264,15 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
             width: 0,
             height: CGFloat.greatestFiniteMagnitude
         )
+    }
+
+    private func configureHighlightOverlay() {
+        let clipView = scrollView.contentView
+        highlightOverlay = ReaderHighlightOverlayView(
+            textView: textView,
+            clipView: clipView
+        )
+        clipView.addSubview(highlightOverlay, positioned: .above, relativeTo: textView)
     }
 
     private func configureControlButtons() {
@@ -257,6 +325,12 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         session.onActiveWordChanged = { [weak self] range in
             self?.showHighlight(for: range)
         }
+        session.onActiveWordProgress = { [weak self] range, progress in
+            self?.highlightOverlay.updateWord(
+                characterRange: range,
+                progress: progress
+            )
+        }
         session.onStateChanged = { [weak self] _ in
             self?.updateControls()
         }
@@ -270,6 +344,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func displayDocument() {
+        highlightOverlay.clear(animated: false)
         textView.string = session.text
 
         let paragraphStyle = NSMutableParagraphStyle()
@@ -277,7 +352,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         paragraphStyle.paragraphSpacing = 6
         let fullRange = NSRange(location: 0, length: session.text.utf16.count)
         textView.textStorage?.setAttributes([
-            .font: NSFont.systemFont(ofSize: 16),
+            .font: NSFont.systemFont(ofSize: readerFontSize),
             .foregroundColor: NSColor.labelColor,
             .paragraphStyle: paragraphStyle,
         ], range: fullRange)
@@ -288,30 +363,66 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         updateControls()
     }
 
+    private func applyReaderFont() {
+        guard let storage = textView.textStorage, storage.length > 0 else { return }
+        storage.addAttribute(
+            .font,
+            value: NSFont.systemFont(ofSize: readerFontSize),
+            range: NSRange(location: 0, length: storage.length)
+        )
+        highlightOverlay.layoutDidChange()
+    }
+
+    private func changeReaderFontSize(by delta: CGFloat) {
+        setReaderFontSize(readerFontSize + delta)
+    }
+
+    private func setReaderFontSize(_ size: CGFloat) {
+        readerFontSize = min(max(size, 10), 48)
+        UserDefaults.standard.set(Double(readerFontSize), forKey: Self.fontSizeKey)
+        applyReaderFont()
+    }
+
+    @objc private func syncOffsetChanged() {
+        session.userSyncTrim = syncStepper.doubleValue
+        UserDefaults.standard.set(session.userSyncTrim, forKey: ReaderSession.syncTrimKey)
+        updateSyncLabel()
+        session.refreshActiveWord()
+    }
+
+    private func updateSyncLabel() {
+        let trimMilliseconds = Int((session.userSyncTrim * 1000).rounded())
+        let trim = trimMilliseconds >= 0 ? "+\(trimMilliseconds)" : "\(trimMilliseconds)"
+        let autoMilliseconds = Int((session.outputLatency * 1000).rounded())
+        let modelMilliseconds = Int((ReaderSession.timestampBias * 1000).rounded())
+        syncLabel.stringValue =
+            "Sync \(trim) ms (auto \(autoMilliseconds) + model \(modelMilliseconds))"
+    }
+
     private func showHighlight(for range: NSRange?) {
-        clearHighlight()
-        guard let range,
-              range.location != NSNotFound,
-              NSMaxRange(range) <= textView.string.utf16.count,
-              let layoutManager = textView.layoutManager
+        guard let range else {
+            clearHighlight()
+            return
+        }
+        guard range.location != NSNotFound,
+              NSMaxRange(range) <= textView.string.utf16.count
         else { return }
 
-        layoutManager.addTemporaryAttribute(
-            .backgroundColor,
-            value: NSColor.controlAccentColor.withAlphaComponent(0.35),
-            forCharacterRange: range
-        )
         highlightedRange = range
+        highlightOverlay.showWord(
+            characterRange: range,
+            duration: session.activeWordDuration
+        )
         scrollToHighlightedWordIfNeeded(range)
     }
 
     private func clearHighlight() {
-        guard let range = highlightedRange else { return }
-        textView.layoutManager?.removeTemporaryAttribute(
-            .backgroundColor,
-            forCharacterRange: range
-        )
         highlightedRange = nil
+        highlightOverlay?.clear(animated: true)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        highlightOverlay?.layoutDidChange()
     }
 
     private func scrollToHighlightedWordIfNeeded(_ characterRange: NSRange) {
@@ -331,9 +442,21 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         wordRect.origin.y += origin.y
 
         let safeVisibleRect = textView.visibleRect.insetBy(dx: 0, dy: 60)
-        if wordRect.minY < safeVisibleRect.minY || wordRect.maxY > safeVisibleRect.maxY {
-            textView.scrollRangeToVisible(characterRange)
+        guard wordRect.minY < safeVisibleRect.minY || wordRect.maxY > safeVisibleRect.maxY else { return }
+
+        // Smoothly scroll so the current line sits ~38% down — animated (no snap)
+        // and with room to read ahead, so the next few words don't re-trigger it.
+        let clipView = scrollView.contentView
+        let viewHeight = clipView.bounds.height
+        let maxY = max(0, textView.bounds.height - viewHeight)
+        let targetY = min(max(wordRect.midY - viewHeight * 0.38, 0), maxY)
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.45
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            clipView.animator().setBoundsOrigin(NSPoint(x: clipView.bounds.origin.x, y: targetY))
         }
+        scrollView.reflectScrolledClipView(clipView)
     }
 
     @objc private func userDidScroll(_ notification: Notification) {
@@ -399,6 +522,23 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
            event.charactersIgnoringModifiers?.lowercased() == "w" {
             window?.performClose(nil)
             return true
+        }
+
+        // Standard text-size shortcuts: ⌘+ / ⌘= larger, ⌘- smaller, ⌘0 reset.
+        if modifiers.contains(.command) {
+            switch event.charactersIgnoringModifiers {
+            case "=", "+":
+                changeReaderFontSize(by: 2)
+                return true
+            case "-":
+                changeReaderFontSize(by: -2)
+                return true
+            case "0":
+                setReaderFontSize(Self.defaultFontSize)
+                return true
+            default:
+                break
+            }
         }
 
         let disallowedPlaybackModifiers: NSEvent.ModifierFlags = [.command, .option, .control]

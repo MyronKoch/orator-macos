@@ -27,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var appVoiceProfilesEditor: AppVoiceProfilesEditor?
     private var oratorWindowController: OratorWindowController?
     private var readerWindowController: ReaderWindowController?
+    private var statusItemDropTarget: FileDropTargetView?
     private var previewAudioPlayer: AVAudioPlayer?
     private var isPreviewRenderInFlight = false
     private var lastReadApp: (bundleID: String, name: String)?
@@ -473,6 +474,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         catch { oratorLog("history speak FAILED: \(error.localizedDescription)") }
     }
 
+    /// Script mode's only playback bridge; parsing and casting stay outside the engine.
+    func speakScriptSegments(_ segments: [SpeechSegment]) throws {
+        guard let timeline else {
+            throw NSError(
+                domain: "Orator.ScriptMode",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "The speech engine is still loading"]
+            )
+        }
+        try timeline.speak(segments: segments)
+    }
+
     func makePronunciationsContentView() -> NSView {
         if pronunciationsEditor == nil {
             pronunciationsEditor = PronunciationsEditor(pronunciations: .shared)
@@ -534,6 +547,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Read the current selection via the Accessibility API. Unlike the synthetic
+    /// ⌘C capture, this never posts a keystroke, so it can't trigger the system
+    /// "bonk" when nothing is selected. Returns nil if there's no selection or
+    /// the focused app doesn't expose one.
+    private func selectedTextViaAccessibility() -> String? {
+        guard AXIsProcessTrusted() else { return nil }
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef
+        ) == .success, let focusedRef else { return nil }
+        let focused = focusedRef as! AXUIElement
+        var selectedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            focused, kAXSelectedTextAttribute as CFString, &selectedRef
+        ) == .success, let text = selectedRef as? String, !text.isEmpty else { return nil }
+        return text
+    }
+
     private func savePasteboard(_ pb: NSPasteboard) -> [[NSPasteboard.PasteboardType: Data]] {
         (pb.pasteboardItems ?? []).map { item in
             var dict = [NSPasteboard.PasteboardType: Data]()
@@ -559,6 +591,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateIcon(speaking: false)
         rebuildMenu()
+
+        if let button = statusItem.button {
+            button.registerForDraggedTypes([.fileURL])
+            let dropTarget = FileDropTargetView(frame: button.bounds)
+            dropTarget.autoresizingMask = [.width, .height]
+            dropTarget.forwardsClicksTo = button
+            dropTarget.onDrop = { [weak self] urls in
+                self?.readFiles(urls)
+            }
+            button.addSubview(dropTarget)
+            statusItemDropTarget = dropTarget
+        }
     }
 
     /// The Orator bust as menu-bar template images (monochrome + alpha, 18pt).
@@ -1084,6 +1128,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Queue text handed over by the "Add to Orator Queue" Service.
     func serviceQueue(_ text: String) { addToReadingQueue(text) }
 
+    /// Read files delivered by drag-and-drop or the Finder file Service.
+    func serviceReadFiles(_ urls: [URL]) { readFiles(urls) }
+
+    /// Queue files delivered by the Finder file Service.
+    func serviceQueueFiles(_ urls: [URL]) { extractFiles(urls, action: .queueAll) }
+
     @objc private func speakClipboardText() {
         speakClipboard()
     }
@@ -1093,41 +1143,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if timeline.current != nil {
             if readerWindowController == nil {
-                readerWindowController = ReaderWindowController(timeline: timeline, engine: engine)
+                readerWindowController = makeReaderWindowController(timeline: timeline, engine: engine)
             }
             readerWindowController?.showFollowingTimeline()
             return
         }
 
-        captureSelectedText { [weak self] capturedText in
-            guard let self, let engine = self.engine, let timeline = self.timeline else { return }
+        // No active playback: read the current selection via Accessibility (no
+        // synthetic ⌘C, so no system beep when nothing is selected), falling
+        // back to the clipboard. The Speak hotkey still uses the ⌘C path.
+        let selection = selectedTextViaAccessibility()?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = (selection?.isEmpty == false ? selection : nil)
+            ?? NSPasteboard.general.string(forType: .string)
 
-            // Speech may have started while selection capture was in flight.
-            // Prefer the live timeline in that case and never replace it with
-            // a passive clipboard document.
-            if timeline.current != nil {
+        if readerWindowController == nil {
+            readerWindowController = makeReaderWindowController(timeline: timeline, engine: engine)
+        }
+        readerWindowController?.show(text: text)
+    }
+
+    private func makeReaderWindowController(
+        timeline: SpeechTimeline,
+        engine: OratorEngine
+    ) -> ReaderWindowController {
+        let controller = ReaderWindowController(timeline: timeline, engine: engine)
+        controller.onFilesDropped = { [weak self] urls in
+            self?.readFilesInReader(urls)
+        }
+        return controller
+    }
+
+    /// Drop INTO the Reader window: show the first file's text with source
+    /// formatting (line breaks preserved) and start reading it. Distinct from
+    /// the icon/Services path (`readFiles`), which does a plain timeline read.
+    func readFilesInReader(_ urls: [URL]) {
+        let supported = urls.filter(FileTextExtractor.supports)
+        guard let first = supported.first else {
+            showNotification(
+                "Couldn’t read file",
+                body: "Choose a PDF, plain-text, Markdown, or RTF file."
+            )
+            return
+        }
+        statusItem.button?.toolTip = "Extracting \(first.lastPathComponent)…"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let extracted = try? FileTextExtractor.extractText(from: first)
+            DispatchQueue.main.async {
+                guard let self, let engine = self.engine, let timeline = self.timeline else { return }
+                self.statusItem.button?.toolTip = nil
+                guard let text = extracted, !text.isEmpty else {
+                    self.showNotification("Couldn’t read file", body: first.lastPathComponent)
+                    return
+                }
+                self.recordHistory(text)
                 if self.readerWindowController == nil {
-                    self.readerWindowController = ReaderWindowController(
+                    self.readerWindowController = self.makeReaderWindowController(
                         timeline: timeline,
                         engine: engine
                     )
                 }
-                self.readerWindowController?.showFollowingTimeline()
-                return
+                self.readerWindowController?.present(text: text, autoplay: true)
             }
-
-            let selectedText = capturedText.flatMap { text in
-                text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
-            }
-            let text = selectedText ?? NSPasteboard.general.string(forType: .string)
-
-            if self.readerWindowController == nil {
-                self.readerWindowController = ReaderWindowController(
-                    timeline: timeline,
-                    engine: engine
-                )
-            }
-            self.readerWindowController?.show(text: text)
         }
     }
 
@@ -1141,21 +1218,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.begin { [weak self] response in
             guard response == .OK, let url = panel.url, let self else { return }
 
-            DispatchQueue.global(qos: .userInitiated).async {
+            self.readFiles([url])
+        }
+    }
+
+    private enum ExtractedFileAction {
+        case readFirstAndQueueRest
+        case queueAll
+    }
+
+    private func readFiles(_ urls: [URL]) {
+        extractFiles(urls, action: .readFirstAndQueueRest)
+    }
+
+    /// The shared file-intake path. Extraction is deliberately serial so a
+    /// multi-file drop or Service invocation preserves Finder's file order.
+    private func extractFiles(_ urls: [URL], action: ExtractedFileAction) {
+        let supportedURLs = urls.filter(FileTextExtractor.supports)
+        guard !supportedURLs.isEmpty else {
+            showNotification(
+                "Couldn’t read file",
+                body: "Choose a PDF, plain-text, Markdown, or RTF file."
+            )
+            return
+        }
+
+        statusItem.button?.toolTip = supportedURLs.count == 1
+            ? "Extracting \(supportedURLs[0].lastPathComponent)…"
+            : "Extracting \(supportedURLs.count) files…"
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var extracted: [String] = []
+            var failures: [String] = []
+            for url in supportedURLs {
                 do {
-                    let text = try FileTextExtractor.extractText(from: url)
-                    let chunks = TextChunker.chunk(text)
-                    DispatchQueue.main.async {
-                        guard let timeline = self.timeline else { return }
-                        self.recordHistory(text)
+                    extracted.append(try FileTextExtractor.extractText(from: url))
+                } catch {
+                    failures.append("\(url.lastPathComponent): \(error.localizedDescription)")
+                }
+            }
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.statusItem.button?.toolTip = nil
+                switch action {
+                case .readFirstAndQueueRest:
+                    if let first = extracted.first, let timeline = self.timeline {
+                        let chunks = TextChunker.chunk(first)
+                        self.recordHistory(first)
                         do { try timeline.speak(chunks: chunks, from: 0) }
                         catch { oratorLog("speak FAILED: \(error.localizedDescription)") }
+                        for text in extracted.dropFirst() {
+                            self.addToReadingQueue(text)
+                        }
                     }
-                } catch {
-                    let message = error.localizedDescription
-                    DispatchQueue.main.async {
-                        self.showNotification("Couldn’t read file", body: message)
+                case .queueAll:
+                    for text in extracted {
+                        self.addToReadingQueue(text)
                     }
+                }
+
+                if !failures.isEmpty {
+                    self.showNotification("Couldn’t read file", body: failures.joined(separator: "\n"))
                 }
             }
         }
