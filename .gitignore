@@ -5,3 +5,6 @@ build/
 branding/Orator.iconset/
 branding/trimmed.png
 branding/icon-master.png
+
+# Local backchannel session identity (per-checkout, never shared)
+.backchannel.json

@@ -1,13 +1,19 @@
-import Foundation
+import AppKit
+import QuartzCore
 
 protocol ReaderSpeechEngine: AnyObject {
     var isSpeaking: Bool { get }
     var isPaused: Bool { get }
     var playbackPosition: TimeInterval? { get }
+    var outputLatency: TimeInterval { get }
 
     func stop()
     func pause()
     func resume()
+}
+
+extension ReaderSpeechEngine {
+    var outputLatency: TimeInterval { 0 }
 }
 
 extension OratorEngine: ReaderSpeechEngine {}
@@ -38,11 +44,31 @@ final class ReaderSession {
     private let timeline: SpeechTimeline
     private let engine: any ReaderSpeechEngine
     private var notificationObservers: [NSObjectProtocol] = []
-    private var positionTimer: Timer?
+    private weak var displayLinkView: NSView?
+    private var positionDisplayLink: CADisplayLink?
     private var alignedWords: [AlignedWord] = []
     private var timedChunks: [TimedChunk] = []
     private var activeWord: AlignedWord?
     private var lastKnownPosition: TimeInterval = 0
+
+    /// A small user adjustment on top of the automatically measured output
+    /// latency. This deliberately uses a new key: readerHighlightOffset stores
+    /// the old full correction and must not be reinterpreted as a trim.
+    static let syncTrimKey = "readerSyncTrim"
+    var userSyncTrim: TimeInterval =
+        (UserDefaults.standard.object(forKey: syncTrimKey) as? Double) ?? 0
+
+    /// Kokoro's predicted word times need an additional lead beyond measured
+    /// output latency. Myron's 80 ms correction tuned by ear minus roughly
+    /// 4 ms measured wired-hardware latency yields this 76 ms constant. It is
+    /// not output latency; it likely combines timestamp-prediction bias with
+    /// a perceptual preference for the highlight to lead acoustic onset.
+    static let timestampBias: TimeInterval = 0.076
+
+    var outputLatency: TimeInterval { engine.outputLatency }
+    var effectiveHighlightCorrection: TimeInterval {
+        outputLatency + Self.timestampBias + userSyncTrim
+    }
 
     private(set) var text = ""
     private(set) var chunks: [String] = []
@@ -67,12 +93,21 @@ final class ReaderSession {
         observeSpeechNotifications()
     }
 
+    func useDisplayLink(from view: NSView) {
+        displayLinkView = view
+    }
+
     /// Loads a passive fallback document without disturbing shared playback.
     func load(rawText: String) {
         resetPlaybackTracking(clearCurrentChunk: true, resetPosition: true)
-        chunks = TextChunker.chunk(rawText)
-        text = chunks.joined(separator: " ")
-        chunkRanges = Self.ranges(for: chunks)
+        // Formatted display (source line breaks preserved) + per-chunk spoken
+        // text and exact display ranges. The word-highlight's literal search
+        // still finds plain words in the display; transformed tokens (numbers/
+        // symbols) simply don't highlight.
+        let document = TextChunker.readerChunks(rawText)
+        text = document.display
+        chunks = document.chunks.map { $0.spoken }
+        chunkRanges = document.chunks.map { $0.displayRange }
         setState(.idle)
         onDocumentChanged?()
         onProgressChanged?(0, nil)
@@ -107,9 +142,9 @@ final class ReaderSession {
             onDocumentChanged?()
         }
 
-        if engine.isSpeaking {
+        if engine.isSpeaking && !engine.isPaused {
             updatePosition()
-            startPositionTimer()
+            startPositionDisplayLink()
         } else {
             if let chunkIndex = chunkIndex(at: lastKnownPosition) {
                 currentChunkIndex = chunkIndex
@@ -176,7 +211,7 @@ final class ReaderSession {
 
     /// Closing the Reader tears down view-only work without changing playback.
     func cleanup() {
-        invalidatePositionTimer()
+        invalidatePositionDisplayLink()
         setActiveWord(nil)
         setState(.idle)
     }
@@ -212,6 +247,7 @@ final class ReaderSession {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.state == .playing else { return }
+                self.invalidatePositionDisplayLink()
                 self.setState(.paused)
             }
         })
@@ -224,6 +260,7 @@ final class ReaderSession {
             MainActor.assumeIsolated {
                 guard let self, self.state == .paused else { return }
                 self.setState(.playing)
+                self.startPositionDisplayLink()
             }
         })
     }
@@ -245,7 +282,7 @@ final class ReaderSession {
                 onDocumentChanged?()
             }
             onProgressChanged?(0, currentChunkIndex)
-            startPositionTimer()
+            startPositionDisplayLink()
 
         case .chunkTimed(let globalIndex):
             guard let timing = timeline.current?.timings[globalIndex] else { return }
@@ -308,31 +345,36 @@ final class ReaderSession {
         }
     }
 
-    private func startPositionTimer() {
-        invalidatePositionTimer()
-        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.updatePosition()
-            }
-        }
-        positionTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
+    private func startPositionDisplayLink() {
+        invalidatePositionDisplayLink()
+        guard let displayLinkView else { return }
+        let displayLink = displayLinkView.displayLink(
+            target: self,
+            selector: #selector(displayLinkDidFire(_:))
+        )
+        positionDisplayLink = displayLink
+        displayLink.add(to: .main, forMode: .common)
     }
 
-    private func invalidatePositionTimer() {
-        positionTimer?.invalidate()
-        positionTimer = nil
+    private func invalidatePositionDisplayLink() {
+        positionDisplayLink?.invalidate()
+        positionDisplayLink = nil
     }
 
-    private func updatePosition() {
+    @objc private func displayLinkDidFire(_ displayLink: CADisplayLink) {
+        let presentationLead = max(0, displayLink.targetTimestamp - CACurrentMediaTime())
+        updatePosition(presentationLead: presentationLead)
+    }
+
+    private func updatePosition(presentationLead: TimeInterval = 0) {
         if let position = engine.playbackPosition {
-            lastKnownPosition = position
+            lastKnownPosition = position + presentationLead
         }
 
         if let chunkIndex = chunkIndex(at: lastKnownPosition), chunkIndex != currentChunkIndex {
             currentChunkIndex = chunkIndex
         }
-        setActiveWord(activeWord(at: lastKnownPosition))
+        updateActiveWord(at: max(0, lastKnownPosition - effectiveHighlightCorrection))
         onProgressChanged?(lastKnownPosition, currentChunkIndex)
     }
 
@@ -373,7 +415,36 @@ final class ReaderSession {
     private func setActiveWord(_ word: AlignedWord?) {
         guard activeWord?.characterRange != word?.characterRange else { return }
         activeWord = word
+        if word == nil { activeWordProgress = 0 }
         onActiveWordChanged?(word?.characterRange)
+    }
+
+    private func updateActiveWord(at correctedPosition: TimeInterval) {
+        let word = activeWord(at: correctedPosition)
+        setActiveWord(word)
+        guard let word else {
+            activeWordProgress = 0
+            return
+        }
+        let duration = word.end - word.start
+        activeWordProgress = duration > 0
+            ? min(max((correctedPosition - word.start) / duration, 0), 1)
+            : 0
+        onActiveWordProgress?(word.characterRange, activeWordProgress)
+    }
+
+    private(set) var activeWordProgress: Double = 0
+    var activeWordDuration: TimeInterval {
+        guard let activeWord else { return 0 }
+        return max(0, activeWord.end - activeWord.start)
+    }
+    var onActiveWordProgress: (@MainActor (_ range: NSRange, _ progress: Double) -> Void)?
+
+    /// Re-apply the active-word highlight from the current position. Called when
+    /// the sync offset changes so the shift is visible immediately, not on the
+    /// next word boundary.
+    func refreshActiveWord() {
+        updateActiveWord(at: max(0, lastKnownPosition - effectiveHighlightCorrection))
     }
 
     private func setState(_ newState: State) {
@@ -383,7 +454,7 @@ final class ReaderSession {
     }
 
     private func resetPlaybackTracking(clearCurrentChunk: Bool, resetPosition: Bool) {
-        invalidatePositionTimer()
+        invalidatePositionDisplayLink()
         alignedWords.removeAll(keepingCapacity: true)
         timedChunks.removeAll(keepingCapacity: true)
         setActiveWord(nil)
@@ -392,7 +463,7 @@ final class ReaderSession {
     }
 
     private func finishCurrentUtterance() {
-        invalidatePositionTimer()
+        invalidatePositionDisplayLink()
         setActiveWord(nil)
         setState(.idle)
         onProgressChanged?(lastKnownPosition, currentChunkIndex)
