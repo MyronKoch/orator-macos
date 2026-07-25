@@ -49,6 +49,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     private let forwardButton = NSButton()
     private let syncStepper = NSStepper()
     private let syncLabel = NSTextField(labelWithString: "")
+    private let highlightColorWell = NSColorWell()
+    private let highlightAutoButton = NSButton()
     private var highlightOverlay: ReaderHighlightOverlayView!
     private var highlightedRange: NSRange?
     private var suppressAutoScrollUntil: TimeInterval = 0
@@ -179,7 +181,35 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         syncStack.spacing = 4
         syncStack.toolTip = "Sync the bouncing ball to the voice (↑ later, ↓ earlier)"
 
-        let readerPreferences = NSStackView(views: [syncStack])
+        // Highlight colour: the auto-derived accent is a sensible default, but
+        // it can only balance contrast - it can't know taste, and a colour that
+        // reads well on one wallpaper/appearance may not on another.
+        let colorLabel = NSTextField(labelWithString: "Highlight")
+        colorLabel.font = .systemFont(ofSize: 11)
+        colorLabel.textColor = .secondaryLabelColor
+        highlightColorWell.color = ReaderHighlightColor.custom ?? highlightOverlay.currentAccentColor
+        highlightColorWell.target = self
+        highlightColorWell.action = #selector(highlightColorChanged)
+        highlightColorWell.setAccessibilityLabel("Reader highlight colour")
+        NSLayoutConstraint.activate([
+            highlightColorWell.widthAnchor.constraint(equalToConstant: 38),
+            highlightColorWell.heightAnchor.constraint(equalToConstant: 20)
+        ])
+        highlightAutoButton.title = "Auto"
+        highlightAutoButton.bezelStyle = .inline
+        highlightAutoButton.controlSize = .small
+        highlightAutoButton.font = .systemFont(ofSize: 10)
+        highlightAutoButton.target = self
+        highlightAutoButton.action = #selector(highlightColorReset)
+        highlightAutoButton.toolTip = "Go back to the automatic highlight colour"
+        let colorStack = NSStackView(views: [colorLabel, highlightColorWell, highlightAutoButton])
+        colorStack.translatesAutoresizingMaskIntoConstraints = false
+        colorStack.orientation = .horizontal
+        colorStack.alignment = .centerY
+        colorStack.spacing = 5
+        colorStack.toolTip = "Colour of the moving highlight"
+
+        let readerPreferences = NSStackView(views: [syncStack, colorStack])
         readerPreferences.translatesAutoresizingMaskIntoConstraints = false
         readerPreferences.orientation = .vertical
         readerPreferences.alignment = .leading
@@ -388,6 +418,17 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         UserDefaults.standard.set(session.userSyncTrim, forKey: ReaderSession.syncTrimKey)
         updateSyncLabel()
         session.refreshActiveWord()
+    }
+
+    @objc private func highlightColorChanged() {
+        ReaderHighlightColor.custom = highlightColorWell.color
+        highlightOverlay.highlightColorDidChange()
+    }
+
+    @objc private func highlightColorReset() {
+        ReaderHighlightColor.custom = nil
+        highlightOverlay.highlightColorDidChange()
+        highlightColorWell.color = highlightOverlay.currentAccentColor
     }
 
     private func updateSyncLabel() {
