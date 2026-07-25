@@ -417,6 +417,8 @@ final class OratorEngine: @unchecked Sendable {
     private struct VoicedChunk {
         let text: String
         let voiceID: String
+        /// Per-chunk rate override; nil falls back to the engine's speed.
+        let speed: Float?
     }
 
     /// Speak pre-chunked text in the current voice. The Reader window chunks its
@@ -431,7 +433,7 @@ final class OratorEngine: @unchecked Sendable {
             oratorLog("speak: lookup failed for \(currentVoice); available: \(Array(voiceNames.prefix(4)))")
             throw OratorError.voiceNotFound(currentVoice)
         }
-        let items = chunks.map { VoicedChunk(text: $0, voiceID: currentVoice) }
+        let items = chunks.map { VoicedChunk(text: $0, voiceID: currentVoice, speed: nil) }
         return try play(items)
     }
 
@@ -450,7 +452,7 @@ final class OratorEngine: @unchecked Sendable {
                 : fallback
             guard let voiceID = resolved else { continue }
             for chunk in TextChunker.chunk(segment.text) {
-                items.append(VoicedChunk(text: chunk, voiceID: voiceID))
+                items.append(VoicedChunk(text: chunk, voiceID: voiceID, speed: segment.speed))
             }
         }
         guard !items.isEmpty else { return -1 }
@@ -479,13 +481,13 @@ final class OratorEngine: @unchecked Sendable {
         player.play()
         NotificationCenter.default.post(name: .oratorSpeechStarted, object: nil)
 
-        let speed = self.speed
+        let defaultSpeed = self.speed
         synthQueue.async { [self] in
             var offset: TimeInterval = 0
             for (chunkIndex, item) in items.enumerated() {
                 if isCancelled(gen) { return }
                 guard let synthesis = try? provider.synthesize(
-                    text: item.text, voiceID: item.voiceID, speed: speed
+                    text: item.text, voiceID: item.voiceID, speed: item.speed ?? defaultSpeed
                 ), !synthesis.samples.isEmpty else { continue }
                 if isCancelled(gen) { return }
                 schedule(samples: synthesis.samples, generation: gen)
