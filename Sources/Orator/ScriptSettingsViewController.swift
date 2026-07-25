@@ -16,6 +16,7 @@ final class ScriptSettingsViewController: NSViewController,
     private let tableView = NSTableView()
     private let statusLabel = NSTextField(wrappingLabelWithString: "Load or paste a Fountain / NAME: script.")
     private let languageWarning = NSTextField(wrappingLabelWithString: "")
+    private let samplePopup = NSPopUpButton(frame: .zero, pullsDown: true)
     private let playButton = NSButton(title: "Play Table Read", target: nil, action: nil)
     private let skipHeadings = NSButton(checkboxWithTitle: "Skip scene headings", target: nil, action: nil)
     private let skipParentheticals = NSButton(checkboxWithTitle: "Skip parentheticals", target: nil, action: nil)
@@ -50,7 +51,19 @@ final class ScriptSettingsViewController: NSViewController,
 
         let loadButton = NSButton(title: "Load Script…", target: self, action: #selector(loadScript))
         let analyzeButton = NSButton(title: "Detect Characters", target: self, action: #selector(analyzeText))
-        let sourceButtons = NSStackView(views: [loadButton, analyzeButton])
+
+        // Pull-down (not a selection popup): picking an item is an action that
+        // loads a script, so nothing should stay "selected" afterwards.
+        samplePopup.pullsDown = true
+        samplePopup.addItem(withTitle: "Sample Scripts")
+        for sample in SampleScripts.all {
+            samplePopup.addItem(withTitle: "\(sample.title)  —  \(sample.subtitle)")
+        }
+        samplePopup.target = self
+        samplePopup.action = #selector(loadSample)
+        samplePopup.toolTip = "Load a short built-in script to try a table read"
+
+        let sourceButtons = NSStackView(views: [loadButton, analyzeButton, samplePopup])
         sourceButtons.orientation = .horizontal
         sourceButtons.spacing = 8
 
@@ -281,6 +294,15 @@ final class ScriptSettingsViewController: NSViewController,
     }
 
     @objc private func analyzeText() { parseCurrentText() }
+
+    /// Load a built-in sample. Index 0 is the pull-down's own title, so the
+    /// samples start at 1.
+    @objc private func loadSample() {
+        let index = samplePopup.indexOfSelectedItem - 1
+        guard SampleScripts.all.indices.contains(index) else { return }
+        let sample = SampleScripts.all[index]
+        setScriptText(sample.text, sourceName: sample.title)
+    }
 
     @objc private func addCharacter() {
         guard contentHash != nil else {
