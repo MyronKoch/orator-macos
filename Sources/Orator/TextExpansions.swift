@@ -14,9 +14,86 @@ enum TextExpansions {
         var result = expandRates(in: text)   // "$15/mo" -> "$15 per month"
         result = expandCurrency(in: result)  // "$15"    -> "15 dollars"
         result = expandSlash(in: result)     // "and/or" -> "and slash or"
+        result = expandTimes(in: result)     // "9:15"   -> "nine fifteen"
+        result = expandOrdinals(in: result)  // "22nd"   -> "twenty-second"
         result = expandNumbers(in: result)   // "15"     -> "fifteen"
         return result
     }
+
+    // MARK: - Times
+
+    /// Clock times, BEFORE `expandNumbers`. That pass matches each side of the
+    /// colon separately and leaves the colon in place ("04:12" -> "four:twelve"),
+    /// which is not how anyone says a time.
+    ///
+    /// Minutes are constrained to 00-59 so ratios and scores ("3:75") are left
+    /// for the ordinary number pass.
+    private static func expandTimes(in text: String) -> String {
+        replace(pattern: "\\b(\\d{1,2}):([0-5]\\d)(?::([0-5]\\d))?\\b", in: text) { groups in
+            let hour = spokenHour(groups[1])
+            let minute = spokenMinutes(groups[2], allowOClock: groups[3].isEmpty)
+            let second = groups[3].isEmpty ? "" : " " + spokenMinutes(groups[3], allowOClock: false)
+            return "\(hour) \(minute)\(second)"
+        }
+    }
+
+    /// A written leading zero is spoken ("04:12" is "oh four twelve").
+    private static func spokenHour(_ raw: String) -> String {
+        guard let value = Int(raw) else { return raw }
+        let hasLeadingZero = raw.count > 1 && raw.hasPrefix("0")
+        return hasLeadingZero ? "oh \(cardinal(value))" : cardinal(value)
+    }
+
+    private static func spokenMinutes(_ raw: String, allowOClock: Bool) -> String {
+        guard let value = Int(raw) else { return raw }
+        if value == 0 { return allowOClock ? "o'clock" : "hundred" }
+        // 01-09 keeps its spoken zero: "9:05" is "nine oh five".
+        return value < 10 ? "oh \(cardinal(value))" : cardinal(value)
+    }
+
+    // MARK: - Ordinals
+
+    /// "22nd" -> "twenty-second". These never matched `expandNumbers` at all:
+    /// its `\b\d[\d,]*\b` needs a word boundary after the digits, and there is
+    /// none between "2" and "n". So ordinals reached the phonemizer as raw
+    /// digits, which is exactly the input Misaki's incomplete number table
+    /// mishandles or drops.
+    private static func expandOrdinals(in text: String) -> String {
+        replace(
+            pattern: "\\b(\\d+)(?:st|nd|rd|th)\\b",
+            in: text,
+            caseInsensitive: true
+        ) { groups in
+            Int(groups[1]).map(ordinal) ?? groups[0]
+        }
+    }
+
+    /// Ordinal words, derived from the cardinal so the full Int range works:
+    /// only the FINAL word changes ("one hundred twenty-two" -> "...twenty-second").
+    static func ordinal(_ number: Int) -> String {
+        if number < 0 { return "minus " + ordinal(-number) }
+        let words = cardinal(number)
+        // The trailing word may follow a space or a hyphen ("twenty-two").
+        guard let separator = words.lastIndex(where: { $0 == " " || $0 == "-" }) else {
+            return ordinalWords[words] ?? words + "th"
+        }
+        let head = String(words[...separator])
+        let tail = String(words[words.index(after: separator)...])
+        return head + (ordinalWords[tail] ?? tail + "th")
+    }
+
+    private static let ordinalWords: [String: String] = [
+        "zero": "zeroth", "one": "first", "two": "second", "three": "third",
+        "four": "fourth", "five": "fifth", "six": "sixth", "seven": "seventh",
+        "eight": "eighth", "nine": "ninth", "ten": "tenth", "eleven": "eleventh",
+        "twelve": "twelfth", "thirteen": "thirteenth", "fourteen": "fourteenth",
+        "fifteen": "fifteenth", "sixteen": "sixteenth", "seventeen": "seventeenth",
+        "eighteen": "eighteenth", "nineteen": "nineteenth", "twenty": "twentieth",
+        "thirty": "thirtieth", "forty": "fortieth", "fifty": "fiftieth",
+        "sixty": "sixtieth", "seventy": "seventieth", "eighty": "eightieth",
+        "ninety": "ninetieth", "hundred": "hundredth", "thousand": "thousandth",
+        "million": "millionth", "billion": "billionth", "trillion": "trillionth",
+    ]
 
     // MARK: - Slash
 
