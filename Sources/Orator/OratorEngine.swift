@@ -1,9 +1,6 @@
 import Foundation
 import AVFoundation
 import CoreAudio
-import KokoroSwift
-import MLX
-import MLXUtilsLibrary
 
 private func defaultOutputDeviceChanged(
     _ objectID: AudioObjectID,
@@ -61,8 +58,11 @@ enum OratorError: LocalizedError {
 /// synthesis pass.
 final class OratorEngine: @unchecked Sendable {
 
-    private let tts: KokoroTTS
-    private let voices: [String: MLXArray]
+    /// The synthesis source. Everything below this line is engine-agnostic:
+    /// the provider supplies PCM, this class still owns scheduling and the
+    /// generation/lock/scheduledBuffers/synthesisDone/speaking state machine.
+    private let kokoro: KokoroProvider
+    private var provider: TTSProvider { kokoro }
     private let audioEngine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let format: AVAudioFormat
@@ -84,9 +84,11 @@ final class OratorEngine: @unchecked Sendable {
     var currentVoice: String = "af_heart"
     var speed: Float = 1.0
 
-    var voiceNames: [String] {
-        voices.keys.map { $0.replacingOccurrences(of: ".npy", with: "") }.sorted()
-    }
+    var voiceNames: [String] { kokoro.localVoiceNames }
+
+    /// Every voice across all installed providers, namespaced. The picker UI
+    /// can group these by `provider` once a second provider exists.
+    var availableVoices: [VoiceInfo] { provider.voices() }
 
     var isSpeaking: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -163,19 +165,10 @@ final class OratorEngine: @unchecked Sendable {
     // MARK: - Init
 
     init(modelPath: URL, voicesPath: URL) throws {
-        GPU.set(cacheLimit: 50 * 1024 * 1024)
-        GPU.set(memoryLimit: 900 * 1024 * 1024)
-
-        tts = KokoroTTS(modelPath: modelPath)
-
-        guard let loaded = NpyzReader.read(fileFromPath: voicesPath) else {
-            throw OratorError.voicesNotFound
-        }
-        voices = loaded
-        oratorLog("engine: loaded \(loaded.count) voices, sample keys: \(Array(loaded.keys.sorted().prefix(3)))")
+        kokoro = try KokoroProvider(modelPath: modelPath, voicesPath: voicesPath)
 
         format = AVAudioFormat(
-            standardFormatWithSampleRate: Double(KokoroTTS.Constants.samplingRate),
+            standardFormatWithSampleRate: kokoro.sampleRate,
             channels: 1
         )!
         audioEngine.attach(player)
@@ -332,14 +325,8 @@ final class OratorEngine: @unchecked Sendable {
     /// Force one tiny synthesis so the first real utterance has no warmup lag.
     func warmUp() {
         synthQueue.async { [self] in
-            guard let voice = voices[currentVoice + ".npy"] ?? voices.values.first.map({ $0 }) else { return }
-            _ = try? tts.generateAudio(voice: voice, language: .enUS, text: "Hi.", speed: 1.0)
+            kokoro.warmUp(voiceID: currentVoice)
         }
-    }
-
-    /// Resolve a voice name to its embedding, tolerating suffix-spelling variants.
-    private func embedding(for voiceName: String) -> MLXArray? {
-        voices[voiceName + ".npy"] ?? voices[voiceName] ?? voices[voiceName + ".npy.npy"]
     }
 
     // MARK: - Export (offline synthesis to file)
@@ -369,14 +356,13 @@ final class OratorEngine: @unchecked Sendable {
             }
             do {
                 guard !chunks.isEmpty else { throw OratorError.noTextToExport }
-                guard let voice = embedding(for: voiceKey) else {
+                guard provider.canSpeak(voiceID: voiceKey) else {
                     throw OratorError.voiceNotFound(voiceKey)
                 }
-                let language: Language = voiceKey.hasPrefix("b") ? .enGB : .enUS
 
                 let settings: [String: Any] = [
                     AVFormatIDKey: kAudioFormatMPEG4AAC,
-                    AVSampleRateKey: Double(KokoroTTS.Constants.samplingRate),
+                    AVSampleRateKey: provider.sampleRate,
                     AVNumberOfChannelsKey: 1,
                     AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
                 ]
@@ -391,9 +377,9 @@ final class OratorEngine: @unchecked Sendable {
 
                     let total = chunks.count
                     for (index, chunk) in chunks.enumerated() {
-                        let (samples, _) = try tts.generateAudio(
-                            voice: voice, language: language, text: chunk, speed: spd
-                        )
+                        let samples = try provider.synthesize(
+                            text: chunk, voiceID: voiceKey, speed: spd
+                        ).samples
                         if !samples.isEmpty,
                            let buffer = AVAudioPCMBuffer(
                                pcmFormat: writeFormat,
@@ -425,11 +411,12 @@ final class OratorEngine: @unchecked Sendable {
         try speak(chunks: TextChunker.chunk(text))
     }
 
-    /// One synthesis unit: text plus the exact voice/language to render it in.
+    /// One synthesis unit: text plus the voice to render it in. The voice is a
+    /// provider-neutral id, not a Kokoro embedding - resolving it is the
+    /// provider's job, which is what lets a second engine slot in here.
     private struct VoicedChunk {
         let text: String
-        let voice: MLXArray
-        let language: Language
+        let voiceID: String
     }
 
     /// Speak pre-chunked text in the current voice. The Reader window chunks its
@@ -440,12 +427,11 @@ final class OratorEngine: @unchecked Sendable {
     func speak(chunks: [String]) throws -> Int {
         guard !chunks.isEmpty else { return -1 }
 
-        guard let voiceEmbedding = embedding(for: currentVoice) else {
-            oratorLog("speak: lookup failed for \(currentVoice); available: \(Array(voices.keys.sorted().prefix(4)))")
+        guard provider.canSpeak(voiceID: currentVoice) else {
+            oratorLog("speak: lookup failed for \(currentVoice); available: \(Array(voiceNames.prefix(4)))")
             throw OratorError.voiceNotFound(currentVoice)
         }
-        let language: Language = currentVoice.hasPrefix("b") ? .enGB : .enUS
-        let items = chunks.map { VoicedChunk(text: $0, voice: voiceEmbedding, language: language) }
+        let items = chunks.map { VoicedChunk(text: $0, voiceID: currentVoice) }
         return try play(items)
     }
 
@@ -456,13 +442,15 @@ final class OratorEngine: @unchecked Sendable {
     /// utterance ID, or -1 if there was nothing to say.
     @discardableResult
     func speak(segments: [SpeechSegment]) throws -> Int {
-        let fallback = embedding(for: currentVoice)
+        let fallback = provider.canSpeak(voiceID: currentVoice) ? currentVoice : nil
         var items: [VoicedChunk] = []
         for segment in segments {
-            guard let voice = embedding(for: segment.voiceName) ?? fallback else { continue }
-            let language: Language = segment.voiceName.hasPrefix("b") ? .enGB : .enUS
+            let resolved = provider.canSpeak(voiceID: segment.voiceName)
+                ? segment.voiceName
+                : fallback
+            guard let voiceID = resolved else { continue }
             for chunk in TextChunker.chunk(segment.text) {
-                items.append(VoicedChunk(text: chunk, voice: voice, language: language))
+                items.append(VoicedChunk(text: chunk, voiceID: voiceID))
             }
         }
         guard !items.isEmpty else { return -1 }
@@ -496,15 +484,15 @@ final class OratorEngine: @unchecked Sendable {
             var offset: TimeInterval = 0
             for (chunkIndex, item) in items.enumerated() {
                 if isCancelled(gen) { return }
-                guard let (samples, tokens) = try? tts.generateAudio(
-                    voice: item.voice, language: item.language, text: item.text, speed: speed
-                ), !samples.isEmpty else { continue }
+                guard let synthesis = try? provider.synthesize(
+                    text: item.text, voiceID: item.voiceID, speed: speed
+                ), !synthesis.samples.isEmpty else { continue }
                 if isCancelled(gen) { return }
-                schedule(samples: samples, generation: gen)
+                schedule(samples: synthesis.samples, generation: gen)
                 offset += emitChunkTiming(
-                    tokens, chunkText: item.text, chunkIndex: chunkIndex,
+                    synthesis.words, chunkText: item.text, chunkIndex: chunkIndex,
                     chunkCount: items.count, offset: offset,
-                    sampleCount: samples.count, generation: gen
+                    sampleCount: synthesis.samples.count, generation: gen
                 )
             }
             lock.lock()
@@ -546,7 +534,7 @@ final class OratorEngine: @unchecked Sendable {
     /// chunk's audio duration so the synthesis loop can advance its running
     /// utterance offset whether or not anyone is listening.
     private func emitChunkTiming(
-        _ tokens: [MToken]?,
+        _ words: [WordTiming]?,
         chunkText: String,
         chunkIndex: Int,
         chunkCount: Int,
@@ -554,11 +542,9 @@ final class OratorEngine: @unchecked Sendable {
         sampleCount: Int,
         generation gen: Int
     ) -> TimeInterval {
-        let duration = Double(sampleCount) / Double(KokoroTTS.Constants.samplingRate)
+        let duration = Double(sampleCount) / provider.sampleRate
         guard let callback = onChunkTiming, !isCancelled(gen) else { return duration }
-        let words = (tokens ?? []).map {
-            WordTiming(text: $0.text, whitespace: $0.whitespace, start: $0.start_ts, end: $0.end_ts)
-        }
+        let words = words ?? []
         let timing = ChunkTiming(
             utteranceID: gen, chunkIndex: chunkIndex, chunkCount: chunkCount,
             text: chunkText, offset: offset, duration: duration, words: words
