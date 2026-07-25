@@ -486,6 +486,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try timeline.speak(segments: segments)
     }
 
+    /// Play a table read WITH the Reader showing the screenplay laid out, so
+    /// the follow-along highlight runs over real script formatting instead of
+    /// the flattened prose the timeline alone can reconstruct.
+    ///
+    /// The document is installed before playback starts: the Reader's ranges
+    /// were computed against the formatted display, and the first chunk timings
+    /// arrive almost immediately.
+    func playScript(_ document: ScriptFormatter.Document) throws {
+        guard let timeline, let engine else {
+            throw NSError(
+                domain: "Orator.ScriptMode",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "The speech engine is still loading"]
+            )
+        }
+        if readerWindowController == nil {
+            readerWindowController = makeReaderWindowController(timeline: timeline, engine: engine)
+        }
+        readerWindowController?.showScript(document)
+        try timeline.speak(segments: document.segments)
+    }
+
     func makePronunciationsContentView() -> NSView {
         if pronunciationsEditor == nil {
             pronunciationsEditor = PronunciationsEditor(pronunciations: .shared)

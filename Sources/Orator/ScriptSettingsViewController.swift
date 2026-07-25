@@ -346,13 +346,16 @@ final class ScriptSettingsViewController: NSViewController,
             readParentheticals: skipParentheticals.state != .on,
             readTransitions: skipTransitions.state != .on
         )
-        let segments = ScriptCaster.cast(elements: elements, cast: cast, options: options)
-        guard !segments.isEmpty else {
+        // Formatted for the Reader AND cast for playback in one pass, so the
+        // highlight ranges and the spoken chunks come from the same source and
+        // cannot drift apart.
+        let document = ScriptFormatter.format(elements: elements, cast: cast, options: options)
+        guard !document.isEmpty else {
             statusLabel.stringValue = "Nothing to play with the current cast and skip options."
             return
         }
         do {
-            try appDelegate.speakScriptSegments(segments)
+            try appDelegate.playScript(document)
             statusLabel.stringValue = "Playing table read."
         } catch {
             statusLabel.stringValue = "Couldn’t start playback: \(error.localizedDescription)"
