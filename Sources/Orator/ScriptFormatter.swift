@@ -37,6 +37,8 @@ enum ScriptFormatter {
         let chunks: [TextChunker.DisplayChunk]
         /// Voice for each chunk, parallel to `chunks`.
         let voices: [String]
+        /// Effective speaking rate for each chunk, parallel to `chunks`.
+        let speeds: [Float]
         let blocks: [Block]
 
         var isEmpty: Bool { chunks.isEmpty }
@@ -47,7 +49,13 @@ enum ScriptFormatter {
         /// aligned with `chunks` and the highlight cannot drift. Merging would
         /// let the chunker re-pack across these boundaries.
         var segments: [SpeechSegment] {
-            zip(chunks, voices).map { SpeechSegment(text: $0.spoken, voiceName: $1) }
+            chunks.indices.map { index in
+                SpeechSegment(
+                    text: chunks[index].spoken,
+                    voiceName: voices[index],
+                    speed: speeds[index]
+                )
+            }
         }
     }
 
@@ -60,12 +68,13 @@ enum ScriptFormatter {
         var utf16Offset = 0
         var chunks: [TextChunker.DisplayChunk] = []
         var voices: [String] = []
+        var speeds: [Float] = []
         var blocks: [Block] = []
         var speaker: String?
 
         /// Append one block of display text, optionally making it speakable.
         /// Returns nothing; everything accumulates.
-        func append(_ text: String, kind: BlockKind, voice: String?) {
+        func append(_ text: String, kind: BlockKind, voice: String?, speed: Float = 1.0) {
             let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !body.isEmpty else { return }
 
@@ -91,6 +100,7 @@ enum ScriptFormatter {
                         spoken: chunk.spoken
                     ))
                     voices.append(voice)
+                    speeds.append(speed)
                 }
                 blocks.append(Block(
                     range: NSRange(location: utf16Offset, length: rendered.utf16.count),
@@ -118,25 +128,36 @@ enum ScriptFormatter {
 
             case .dialogue(let text):
                 let voice = speaker.flatMap { cast.characterVoices[$0] }
-                append(text, kind: .dialogue, voice: voice)
+                append(
+                    text,
+                    kind: .dialogue,
+                    voice: voice,
+                    speed: speaker.map { cast.effectiveSpeed(forCharacter: $0) }
+                        ?? cast.effectiveNarratorSpeed
+                )
 
             case .action(let text):
                 speaker = nil
-                append(text, kind: .action, voice: cast.narratorVoice)
+                append(
+                    text, kind: .action,
+                    voice: cast.narratorVoice, speed: cast.effectiveNarratorSpeed
+                )
 
             case .sceneHeading(let text):
                 speaker = nil
                 append(
                     text,
                     kind: .sceneHeading,
-                    voice: options.readSceneHeadings ? cast.narratorVoice : nil
+                    voice: options.readSceneHeadings ? cast.narratorVoice : nil,
+                    speed: cast.effectiveNarratorSpeed
                 )
 
             case .parenthetical(let text):
                 append(
                     text,
                     kind: .parenthetical,
-                    voice: options.readParentheticals ? cast.narratorVoice : nil
+                    voice: options.readParentheticals ? cast.narratorVoice : nil,
+                    speed: cast.effectiveNarratorSpeed
                 )
 
             case .transition(let text):
@@ -144,11 +165,14 @@ enum ScriptFormatter {
                 append(
                     text,
                     kind: .transition,
-                    voice: options.readTransitions ? cast.narratorVoice : nil
+                    voice: options.readTransitions ? cast.narratorVoice : nil,
+                    speed: cast.effectiveNarratorSpeed
                 )
             }
         }
 
-        return Document(display: display, chunks: chunks, voices: voices, blocks: blocks)
+        return Document(
+            display: display, chunks: chunks, voices: voices, speeds: speeds, blocks: blocks
+        )
     }
 }

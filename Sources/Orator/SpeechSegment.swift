@@ -8,4 +8,14 @@ import Foundation
 struct SpeechSegment: Sendable {
     let text: String
     let voiceName: String
+    /// Speaking rate for this segment. `nil` uses the engine's current speed,
+    /// which is what every non-script caller wants. Script mode sets it so one
+    /// character can rattle while another takes their time.
+    let speed: Float?
+
+    init(text: String, voiceName: String, speed: Float? = nil) {
+        self.text = text
+        self.voiceName = voiceName
+        self.speed = speed
+    }
 }
