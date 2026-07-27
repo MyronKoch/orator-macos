@@ -8,6 +8,7 @@ final class ScriptSettingsViewController: NSViewController,
     private enum Column {
         static let role = NSUserInterfaceItemIdentifier("ScriptRole")
         static let voice = NSUserInterfaceItemIdentifier("ScriptVoice")
+        static let speed = NSUserInterfaceItemIdentifier("ScriptSpeed")
     }
 
     private unowned let appDelegate: AppDelegate
@@ -16,6 +17,9 @@ final class ScriptSettingsViewController: NSViewController,
     private let tableView = NSTableView()
     private let statusLabel = NSTextField(wrappingLabelWithString: "Load or paste a Fountain / NAME: script.")
     private let languageWarning = NSTextField(wrappingLabelWithString: "")
+    private let samplePopup = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let overallSpeedSlider = NSSlider()
+    private let overallSpeedLabel = NSTextField(labelWithString: "")
     private let playButton = NSButton(title: "Play Table Read", target: nil, action: nil)
     private let skipHeadings = NSButton(checkboxWithTitle: "Skip scene headings", target: nil, action: nil)
     private let skipParentheticals = NSButton(checkboxWithTitle: "Skip parentheticals", target: nil, action: nil)
@@ -50,7 +54,19 @@ final class ScriptSettingsViewController: NSViewController,
 
         let loadButton = NSButton(title: "Load Script…", target: self, action: #selector(loadScript))
         let analyzeButton = NSButton(title: "Detect Characters", target: self, action: #selector(analyzeText))
-        let sourceButtons = NSStackView(views: [loadButton, analyzeButton])
+
+        // Pull-down (not a selection popup): picking an item is an action that
+        // loads a script, so nothing should stay "selected" afterwards.
+        samplePopup.pullsDown = true
+        samplePopup.addItem(withTitle: "Sample Scripts")
+        for sample in SampleScripts.all {
+            samplePopup.addItem(withTitle: "\(sample.title)  —  \(sample.subtitle)")
+        }
+        samplePopup.target = self
+        samplePopup.action = #selector(loadSample)
+        samplePopup.toolTip = "Load a short built-in script to try a table read"
+
+        let sourceButtons = NSStackView(views: [loadButton, analyzeButton, samplePopup])
         sourceButtons.orientation = .horizontal
         sourceButtons.spacing = 8
 
@@ -90,6 +106,24 @@ final class ScriptSettingsViewController: NSViewController,
         options.orientation = .horizontal
         options.spacing = 12
 
+        // Script-wide multiplier applied on top of each character's own pace,
+        // so the whole read can be sped up without re-tuning every row.
+        overallSpeedSlider.minValue = Double(ScriptCast.minSpeed)
+        overallSpeedSlider.maxValue = Double(ScriptCast.maxSpeed)
+        overallSpeedSlider.floatValue = cast.overallSpeed
+        overallSpeedSlider.isContinuous = true
+        overallSpeedSlider.controlSize = .small
+        overallSpeedSlider.target = self
+        overallSpeedSlider.action = #selector(changeOverallSpeed(_:))
+        overallSpeedSlider.setAccessibilityLabel("Overall table read speed")
+        overallSpeedSlider.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        overallSpeedLabel.font = .systemFont(ofSize: 11)
+        overallSpeedLabel.textColor = .secondaryLabelColor
+        let overallStack = NSStackView(views: [overallSpeedSlider, overallSpeedLabel])
+        overallStack.orientation = .horizontal
+        overallStack.alignment = .centerY
+        overallStack.spacing = 8
+
         statusLabel.font = .systemFont(ofSize: 11)
         statusLabel.textColor = .secondaryLabelColor
         languageWarning.font = .systemFont(ofSize: 11, weight: .medium)
@@ -110,6 +144,7 @@ final class ScriptSettingsViewController: NSViewController,
         content.addArrangedSubview(tableScroll)
         content.addArrangedSubview(addButton)
         content.addArrangedSubview(options)
+        content.addArrangedSubview(overallStack)
         content.addArrangedSubview(languageWarning)
         content.addArrangedSubview(playButton)
 
@@ -129,6 +164,8 @@ final class ScriptSettingsViewController: NSViewController,
     func refresh() {
         guard isViewLoaded else { return }
         tableView.reloadData()
+        overallSpeedSlider.floatValue = ScriptCast.clamp(cast.overallSpeed)
+        updateOverallSpeedLabel()
         updateState()
     }
 
@@ -146,12 +183,49 @@ final class ScriptSettingsViewController: NSViewController,
             return label
         }
 
+        if identifier == Column.speed {
+            // A draggable slider rather than a stepper: pace is a feel you tune
+            // by ear, and dragging lets you sweep the range instead of clicking
+            // toward it. The live readout is the label beside it.
+            let slider = NSSlider(
+                value: Double(row == 0 ? cast.narratorSpeed : cast.speed(forCharacter: role)),
+                minValue: Double(ScriptCast.minSpeed),
+                maxValue: Double(ScriptCast.maxSpeed),
+                target: self,
+                action: #selector(changeSpeed(_:))
+            )
+            slider.tag = row
+            slider.isContinuous = true
+            slider.controlSize = .small
+            slider.setAccessibilityLabel("\(role) speaking speed")
+
+            let readout = NSTextField(labelWithString: "")
+            readout.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+            readout.textColor = .secondaryLabelColor
+            readout.alignment = .right
+            readout.identifier = Self.speedReadoutID
+            readout.stringValue = Self.speedText(slider.floatValue)
+            readout.setContentHuggingPriority(.required, for: .horizontal)
+
+            let stack = NSStackView(views: [slider, readout])
+            stack.orientation = .horizontal
+            stack.alignment = .centerY
+            stack.spacing = 6
+            return stack
+        }
+
         let popup = NSPopUpButton(frame: .zero, pullsDown: false)
         popup.tag = row
         popup.target = self
         popup.action = #selector(changeVoice(_:))
         populate(popup, selectedVoice: row == 0 ? cast.narratorVoice : cast.characterVoices[role])
         return popup
+    }
+
+    private static let speedReadoutID = NSUserInterfaceItemIdentifier("speedReadout")
+
+    private static func speedText(_ speed: Float) -> String {
+        String(format: "%.2f×", speed)
     }
 
     func textDidChange(_ notification: Notification) {
@@ -172,11 +246,17 @@ final class ScriptSettingsViewController: NSViewController,
         role.resizingMask = .autoresizingMask
         let voice = NSTableColumn(identifier: Column.voice)
         voice.title = "Voice"
-        voice.width = 250
-        voice.minWidth = 150
+        voice.width = 220
+        voice.minWidth = 140
         voice.resizingMask = .autoresizingMask
+        let speed = NSTableColumn(identifier: Column.speed)
+        speed.title = "Speed"
+        speed.width = 150
+        speed.minWidth = 120
+        speed.resizingMask = .autoresizingMask
         tableView.addTableColumn(role)
         tableView.addTableColumn(voice)
+        tableView.addTableColumn(speed)
     }
 
     private func populate(_ popup: NSPopUpButton, selectedVoice: String?) {
@@ -282,6 +362,15 @@ final class ScriptSettingsViewController: NSViewController,
 
     @objc private func analyzeText() { parseCurrentText() }
 
+    /// Load a built-in sample. Index 0 is the pull-down's own title, so the
+    /// samples start at 1.
+    @objc private func loadSample() {
+        let index = samplePopup.indexOfSelectedItem - 1
+        guard SampleScripts.all.indices.contains(index) else { return }
+        let sample = SampleScripts.all[index]
+        setScriptText(sample.text, sourceName: sample.title)
+    }
+
     @objc private func addCharacter() {
         guard contentHash != nil else {
             statusLabel.stringValue = "Load or detect a script before adding a character."
@@ -316,6 +405,45 @@ final class ScriptSettingsViewController: NSViewController,
         updateState()
     }
 
+    @objc private func changeSpeed(_ sender: NSSlider) {
+        let value = ScriptCast.clamp(sender.floatValue)
+        if sender.tag == 0 {
+            cast.narratorSpeed = value
+        } else if characterNames.indices.contains(sender.tag - 1) {
+            cast.characterSpeeds[characterNames[sender.tag - 1]] = value
+        }
+        // Update the readout beside this slider without reloading the table,
+        // so the drag is not interrupted mid-gesture.
+        if let stack = sender.superview as? NSStackView,
+           let readout = stack.arrangedSubviews
+               .compactMap({ $0 as? NSTextField })
+               .first(where: { $0.identifier == Self.speedReadoutID }) {
+            readout.stringValue = Self.speedText(value)
+        }
+        persistCast()
+        updateOverallSpeedLabel()
+    }
+
+    @objc private func changeOverallSpeed(_ sender: NSSlider) {
+        cast.overallSpeed = ScriptCast.clamp(sender.floatValue)
+        persistCast()
+        updateOverallSpeedLabel()
+    }
+
+    private func updateOverallSpeedLabel() {
+        let overall = ScriptCast.clamp(cast.overallSpeed)
+        var text = String(format: "Overall speed  %.2f×", overall)
+        // Spell out what the multiplier actually does to a couple of cast
+        // members, so the interaction between the two controls is legible.
+        let examples = characterNames.prefix(2).map { name in
+            String(format: "%@ %.2f×", name, cast.effectiveSpeed(forCharacter: name))
+        }
+        if !examples.isEmpty {
+            text += "  →  " + examples.joined(separator: ", ")
+        }
+        overallSpeedLabel.stringValue = text
+    }
+
     @objc private func optionChanged() { updateState() }
 
     @objc private func play() {
@@ -324,13 +452,16 @@ final class ScriptSettingsViewController: NSViewController,
             readParentheticals: skipParentheticals.state != .on,
             readTransitions: skipTransitions.state != .on
         )
-        let segments = ScriptCaster.cast(elements: elements, cast: cast, options: options)
-        guard !segments.isEmpty else {
+        // Formatted for the Reader AND cast for playback in one pass, so the
+        // highlight ranges and the spoken chunks come from the same source and
+        // cannot drift apart.
+        let document = ScriptFormatter.format(elements: elements, cast: cast, options: options)
+        guard !document.isEmpty else {
             statusLabel.stringValue = "Nothing to play with the current cast and skip options."
             return
         }
         do {
-            try appDelegate.speakScriptSegments(segments)
+            try appDelegate.playScript(document)
             statusLabel.stringValue = "Playing table read."
         } catch {
             statusLabel.stringValue = "Couldn’t start playback: \(error.localizedDescription)"
