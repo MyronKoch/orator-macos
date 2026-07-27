@@ -49,6 +49,8 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     private let forwardButton = NSButton()
     private let syncStepper = NSStepper()
     private let syncLabel = NSTextField(labelWithString: "")
+    private let highlightColorWell = NSColorWell()
+    private let highlightAutoButton = NSButton()
     private var highlightOverlay: ReaderHighlightOverlayView!
     private var highlightedRange: NSRange?
     private var suppressAutoScrollUntil: TimeInterval = 0
@@ -91,6 +93,15 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     func present(text rawText: String, autoplay: Bool) {
         show(text: rawText)
         if autoplay { session.play(fromChunk: 0) }
+    }
+
+    /// Show a screenplay-formatted table read. The document must be installed
+    /// before playback starts so the first timings land on a document whose
+    /// ranges already match.
+    func showScript(_ document: ScriptFormatter.Document) {
+        clearHighlight()
+        session.loadScript(document)
+        presentWindow()
     }
 
     func showFollowingTimeline() {
@@ -179,7 +190,35 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         syncStack.spacing = 4
         syncStack.toolTip = "Sync the bouncing ball to the voice (↑ later, ↓ earlier)"
 
-        let readerPreferences = NSStackView(views: [syncStack])
+        // Highlight colour: the auto-derived accent is a sensible default, but
+        // it can only balance contrast - it can't know taste, and a colour that
+        // reads well on one wallpaper/appearance may not on another.
+        let colorLabel = NSTextField(labelWithString: "Highlight")
+        colorLabel.font = .systemFont(ofSize: 11)
+        colorLabel.textColor = .secondaryLabelColor
+        highlightColorWell.color = ReaderHighlightColor.custom ?? highlightOverlay.currentAccentColor
+        highlightColorWell.target = self
+        highlightColorWell.action = #selector(highlightColorChanged)
+        highlightColorWell.setAccessibilityLabel("Reader highlight colour")
+        NSLayoutConstraint.activate([
+            highlightColorWell.widthAnchor.constraint(equalToConstant: 38),
+            highlightColorWell.heightAnchor.constraint(equalToConstant: 20)
+        ])
+        highlightAutoButton.title = "Auto"
+        highlightAutoButton.bezelStyle = .inline
+        highlightAutoButton.controlSize = .small
+        highlightAutoButton.font = .systemFont(ofSize: 10)
+        highlightAutoButton.target = self
+        highlightAutoButton.action = #selector(highlightColorReset)
+        highlightAutoButton.toolTip = "Go back to the automatic highlight colour"
+        let colorStack = NSStackView(views: [colorLabel, highlightColorWell, highlightAutoButton])
+        colorStack.translatesAutoresizingMaskIntoConstraints = false
+        colorStack.orientation = .horizontal
+        colorStack.alignment = .centerY
+        colorStack.spacing = 5
+        colorStack.toolTip = "Colour of the moving highlight"
+
+        let readerPreferences = NSStackView(views: [syncStack, colorStack])
         readerPreferences.translatesAutoresizingMaskIntoConstraints = false
         readerPreferences.orientation = .vertical
         readerPreferences.alignment = .leading
@@ -357,10 +396,69 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
             .paragraphStyle: paragraphStyle,
         ], range: fullRange)
 
+        applyScriptLayout()
+
         emptyMessage.isHidden = !session.text.isEmpty
         textView.scrollToBeginningOfDocument(nil)
         updateProgress(elapsed: 0, chunkIndex: nil)
         updateControls()
+    }
+
+    /// Lay a script document out like a screenplay: indented character cues and
+    /// dialogue, right-aligned transitions, emphasised scene headings.
+    ///
+    /// Indents are paragraph attributes rather than literal spaces because the
+    /// Reader uses a proportional font, where padded spaces do not align. They
+    /// scale with the reader font size so the shape survives ⌘+ / ⌘-.
+    private func applyScriptLayout() {
+        let blocks = session.scriptBlocks
+        guard !blocks.isEmpty, let storage = textView.textStorage else { return }
+
+        let size = readerFontSize
+        let documentLength = storage.length
+
+        for block in blocks {
+            guard block.range.location >= 0,
+                  block.range.location + block.range.length <= documentLength
+            else { continue }
+
+            let style = NSMutableParagraphStyle()
+            style.lineHeightMultiple = 1.35
+            style.paragraphSpacing = 6
+            var font = NSFont.systemFont(ofSize: size)
+            var color = NSColor.labelColor
+
+            switch block.kind {
+            case .sceneHeading:
+                font = .systemFont(ofSize: size, weight: .semibold)
+                style.paragraphSpacingBefore = size * 0.6
+            case .action:
+                break
+            case .characterCue:
+                font = .systemFont(ofSize: size, weight: .semibold)
+                style.firstLineHeadIndent = size * 6
+                style.headIndent = size * 6
+                style.paragraphSpacing = 2
+                style.paragraphSpacingBefore = size * 0.4
+            case .parenthetical:
+                style.firstLineHeadIndent = size * 4.5
+                style.headIndent = size * 4.5
+                style.paragraphSpacing = 2
+                color = .secondaryLabelColor
+            case .dialogue:
+                style.firstLineHeadIndent = size * 3
+                style.headIndent = size * 3
+                style.tailIndent = -size * 2
+            case .transition:
+                style.alignment = .right
+                color = .secondaryLabelColor
+            }
+
+            storage.addAttributes(
+                [.paragraphStyle: style, .font: font, .foregroundColor: color],
+                range: block.range
+            )
+        }
     }
 
     private func applyReaderFont() {
@@ -370,6 +468,10 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
             value: NSFont.systemFont(ofSize: readerFontSize),
             range: NSRange(location: 0, length: storage.length)
         )
+        // Script indents are expressed in multiples of the reader font size, so
+        // a resize invalidates them - and the blanket font above would flatten
+        // the cue/heading weights. Re-apply.
+        applyScriptLayout()
         highlightOverlay.layoutDidChange()
     }
 
@@ -388,6 +490,17 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         UserDefaults.standard.set(session.userSyncTrim, forKey: ReaderSession.syncTrimKey)
         updateSyncLabel()
         session.refreshActiveWord()
+    }
+
+    @objc private func highlightColorChanged() {
+        ReaderHighlightColor.custom = highlightColorWell.color
+        highlightOverlay.highlightColorDidChange()
+    }
+
+    @objc private func highlightColorReset() {
+        ReaderHighlightColor.custom = nil
+        highlightOverlay.highlightColorDidChange()
+        highlightColorWell.color = highlightOverlay.currentAccentColor
     }
 
     private func updateSyncLabel() {

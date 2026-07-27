@@ -73,6 +73,9 @@ final class ReaderSession {
     private(set) var text = ""
     private(set) var chunks: [String] = []
     private(set) var chunkRanges: [NSRange] = []
+    /// Screenplay block map when the current document came from `loadScript`;
+    /// empty for ordinary prose. Drives the Reader's per-block indentation.
+    private(set) var scriptBlocks: [ScriptFormatter.Block] = []
     private(set) var state: State = .idle
     private(set) var currentChunkIndex: Int?
 
@@ -108,6 +111,27 @@ final class ReaderSession {
         text = document.display
         chunks = document.chunks.map { $0.spoken }
         chunkRanges = document.chunks.map { $0.displayRange }
+        scriptBlocks = []
+        setState(.idle)
+        onDocumentChanged?()
+        onProgressChanged?(0, nil)
+    }
+
+    /// Adopt a screenplay-laid-out document built by `ScriptFormatter`.
+    ///
+    /// Unlike `syncFromTimeline()`, which can only recover the flat spoken
+    /// chunks, this keeps the script's structure: the ranges were computed
+    /// against the formatted display, so the highlight lands on the right words
+    /// while cues and headings stay visible and silent.
+    ///
+    /// Call this BEFORE starting playback so the document is in place when the
+    /// first timings arrive.
+    func loadScript(_ document: ScriptFormatter.Document) {
+        resetPlaybackTracking(clearCurrentChunk: true, resetPosition: true)
+        text = document.display
+        chunks = document.chunks.map { $0.spoken }
+        chunkRanges = document.chunks.map { $0.displayRange }
+        scriptBlocks = document.blocks
         setState(.idle)
         onDocumentChanged?()
         onProgressChanged?(0, nil)
@@ -220,6 +244,7 @@ final class ReaderSession {
         self.chunks = chunks
         text = chunks.joined(separator: " ")
         chunkRanges = Self.ranges(for: chunks)
+        scriptBlocks = []
     }
 
     private static func ranges(for chunks: [String]) -> [NSRange] {
