@@ -76,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
+        NSApp.mainMenu = MainMenu.build(appDelegate: self)
         setupStatusItem()
         loadEngineAsync()
         registerServices()
@@ -928,6 +929,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openOratorSettings() {
         showOratorWindow(tab: .voices)
+    }
+
+    @objc private func openOratorHelp() {
+        guard let url = URL(string: "https://github.com/MyronKoch/orator-macos") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private func showOratorWindow(tab: OratorTab) {
