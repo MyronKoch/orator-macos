@@ -706,14 +706,19 @@ final class DashboardView: NSView {
         let dividerTwo = DashboardDividerView(.vertical)
         dividerOne.heightAnchor.constraint(equalToConstant: 44).isActive = true
         dividerTwo.heightAnchor.constraint(equalToConstant: 44).isActive = true
-        reads.widthAnchor.constraint(equalTo: average.widthAnchor).isActive = true
-        average.widthAnchor.constraint(equalTo: cast.widthAnchor).isActive = true
 
         let row = NSStackView(views: [reads, dividerOne, average, dividerTwo, cast])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 0
         row.distribution = .fill
+
+        // Equal-width constraints relate three DIFFERENT cells, so they need a
+        // common ancestor - which only exists once the cells are in `row`.
+        // Activating them earlier throws "no common ancestor" and silently
+        // aborts the whole dashboard build (the window then never appears).
+        reads.widthAnchor.constraint(equalTo: average.widthAnchor).isActive = true
+        average.widthAnchor.constraint(equalTo: cast.widthAnchor).isActive = true
 
         let result = DashboardCardView(horizontalPadding: 0, verticalPadding: 0)
         result.setContent(row)
