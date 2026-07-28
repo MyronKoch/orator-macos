@@ -76,12 +76,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
+        NSApp.mainMenu = MainMenu.build(appDelegate: self)
         setupStatusItem()
         loadEngineAsync()
         registerServices()
 
         if AXIsProcessTrusted() {
             installKeyMonitor()
+            // Now that Orator is a regular (Dock) app, launching it should show
+            // its window like any Mac app - an accessory app never needed to,
+            // which is why nothing appeared after the .regular conversion. On
+            // first run the onboarding window takes precedence instead.
+            showOratorWindow(tab: .dashboard)
         } else {
             showOnboarding()
             startTrustPolling()
@@ -930,11 +936,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showOratorWindow(tab: .voices)
     }
 
+    @objc private func openOratorHelp() {
+        guard let url = URL(string: "https://github.com/MyronKoch/orator-macos") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     private func showOratorWindow(tab: OratorTab) {
         if oratorWindowController == nil {
             oratorWindowController = OratorWindowController(appDelegate: self)
         }
         oratorWindowController?.show(tab: tab)
+    }
+
+    /// Clicking the Dock icon (or reopening) with no window visible should bring
+    /// the dashboard back, as users expect of any Mac app.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows {
+            showOratorWindow(tab: .dashboard)
+        }
+        return true
     }
 
     @objc private func selectVoice(_ sender: NSMenuItem) {

@@ -60,7 +60,7 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
     init(appDelegate: AppDelegate) {
         self.appDelegate = appDelegate
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 720),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -161,8 +161,24 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.setFrameAutosaveName("OratorWindow")
-        if !window.setFrameUsingName("OratorWindow") {
-            window.center()
+        // Restore the saved frame, but if it lands off every current screen
+        // (a disconnected monitor, a changed display arrangement) recenter it -
+        // otherwise the window opens where the user can't see it.
+        let restored = window.setFrameUsingName("OratorWindow")
+        let onScreen = NSScreen.screens.contains { $0.visibleFrame.intersects(window.frame) }
+        if !restored || !onScreen {
+            // Center on the primary (menu-bar) screen - the one at the global
+            // origin - not NSScreen.main, which in a multi-display setup can be
+            // a secondary monitor the user isn't looking at.
+            let primary = NSScreen.screens.first { $0.frame.origin == .zero } ?? NSScreen.main
+            if let visible = primary?.visibleFrame {
+                window.setFrameOrigin(NSPoint(
+                    x: visible.midX - window.frame.width / 2,
+                    y: visible.midY - window.frame.height / 2
+                ))
+            } else {
+                window.center()
+            }
         }
 
         let root = NSView()
