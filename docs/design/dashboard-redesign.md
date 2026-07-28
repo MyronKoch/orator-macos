@@ -58,13 +58,14 @@ All colors are **dynamic** (resolve per appearance). Hex is `#RRGGBB`; alpha giv
 
 ### 1.2 Spacing scale (base unit = 4)
 
-Use only these steps: `4, 8, 12, 16, 20, 24, 32, 40`.
+Use the 4pt scale for component details: `4, 8, 12, 16, 20, 24, 32, 40`.
+The dashboard column uses a deliberate **10pt** density step for card gaps.
 
-- Card interior padding: **18 horizontal / 16 vertical**.
-- Gap between cards (same group): **16**.
-- Gap between groups: **28**.
+- Card interior padding: **16 horizontal / 8 vertical** for dense content cards.
+- Gap between cards and groups in the dashboard column: **10**.
+- Gap between the two breakdown cards: **12**.
 - Content column side gutters: **32** (min **24** when window is narrow).
-- Header → first card: **28**.
+- Header → first card: **10**.
 
 ### 1.3 Corner-radius scale
 
@@ -85,10 +86,10 @@ SF Pro for text; **SF Pro Rounded** for all numerals that represent a stat. Roun
 |---|---|---|---|
 | Page title | SF Pro Display | 28 / Bold | `TextPrimary` |
 | Page subtitle | SF Pro Text | 13 / Regular | `TextSecondary` |
-| Hero number | SF Pro Rounded | 44 / Bold | tabular, `TextPrimary` |
-| Stat large | SF Pro Rounded | 30 / Semibold | tabular (hours, streak number) |
+| Hero number | SF Pro Rounded | 40 / Bold | tabular, `TextPrimary` |
+| Stat large | SF Pro Rounded | 24 / Semibold | tabular (hours, streak number) |
 | Stat medium | SF Pro Rounded | 20 / Semibold | tabular (footer strip) |
-| Unit suffix | SF Pro Text | 15 / Medium | `TextSecondary`, baseline-aligned to a large numeral |
+| Unit suffix | SF Pro Text | 13 / Medium | `TextSecondary`, baseline-aligned to a large numeral |
 | Card title | SF Pro Text | 15 / Semibold | `TextPrimary`, with a leading SF Symbol |
 | Eyebrow | SF Pro Text | 11 / Semibold | UPPERCASE, tracking **+0.5**, `TextTertiary` |
 | Body | SF Pro Text | 13 / Regular | `TextSecondary` |
@@ -119,14 +120,14 @@ Optional dark-mode glow (voicebox flourish): behind the today chart bar and the 
 
 ### 2.2 Top-to-bottom order (new)
 
-1. **Header band** — "Dashboard" title (Page title) + subtitle "Your reading, remembered privately on this Mac." (Page subtitle), with a right-aligned **privacy pill** (`lock.fill` + "On this Mac"). 28pt gap below.
-2. **Hero card** (full column width, ~140pt tall) — one wide card, not three tiles. See §3.
+1. **Header band** — "Dashboard" title (Page title) + subtitle "Your reading, remembered privately on this Mac." (Page subtitle), with a right-aligned **privacy pill** (`lock.fill` + "On this Mac"). 10pt gap below.
+2. **Hero card** (full column width, 112pt tall) — one wide card, not three tiles. See §3.
 3. **"This week" card** — merged goal + chart in one card. See §4.
 4. **Breakdowns row** — "Where you read" / "Voices you pick", 2-up, equal width. See §6.
 5. **Longest read** — editorial feature card. See §7.
 6. **Footer stat strip** — reads / avg words per read / cast reads, one slim divided strip. See §8.
 
-Grouping (controls vertical gaps): Header · [Hero] · [This week] · [Breakdowns] · [Longest + Footer]. 28pt between groups, 16pt within.
+Grouping (controls vertical gaps): Header · [Hero] · [This week] · [Breakdowns] · [Longest + Footer]. Use a compact 10pt gap throughout.
 
 **Net change:** from 6 big tiles + 4 cards (10 heavy blocks, all near-equal weight) to 1 hero + 1 merged card + 2 breakdowns + 1 feature + 1 slim strip. Fewer, ranked, calmer.
 
@@ -136,16 +137,16 @@ Grouping (controls vertical gaps): Header · [Hero] · [This week] · [Breakdown
 
 Replaces the current three equal `metricCard`s in `makeHeroRow()`.
 
-**Container:** one full-width card, `CardBG_Hero`, hero elevation, radius 14, height **140**. Interior padding 20 horizontal / 18 vertical. Horizontal `NSStackView`, `alignment = .centerY`, with a left block, a flexible spacer, a 1px `Hairline` vertical divider (inset 12 top/bottom), and a right block.
+**Container:** one full-width card, `CardBG_Hero`, hero elevation, radius 14, height **112**. Interior padding 20 horizontal / 10 vertical. Horizontal `NSStackView`, `alignment = .centerY`, with a left block, a flexible spacer, a 1px `Hairline` vertical divider (70pt tall), and a right block.
 
 **Left block (the hero moment):**
-- Line 1: lifetime words — Hero number (SF Rounded **44 / Bold**, tabular, `TextPrimary`).
+- Line 1: lifetime words — Hero number (SF Rounded **40 / Bold**, tabular, `TextPrimary`).
 - Line 2: caption "words read aloud" — Caption (12 / Medium, `TextSecondary`, tracking +0.2).
 - Line 3 (conditional): `＋{wordsToday} today` — Accent delta (SF Rounded 13 / Semibold, `EmberText`). **Render only when `wordsToday > 0`.** Uses the previously-unused `wordsToday`. Format the number with the existing decimal formatter.
 
 **Right block (two stacked satellites, divided by a 1px `Hairline` horizontal rule):**
-- **Hours listened:** `headphones` SF Symbol (13pt, `TextSecondary`) + number Stat large (SF Rounded 30 / Semibold, `TextPrimary`) with unit "hrs" as Unit suffix (15 / Medium, `TextSecondary`) baseline-aligned. Caption "hours listened" (11 / Medium, `TextSecondary`). Value = `lifetimeSeconds / 3600`, one decimal.
-- **Current streak:** `flame.fill` SF Symbol (14pt, `Ember`) + number Stat large (SF Rounded 30 / Semibold, `EmberText`). Caption "day streak". Sub-caption "Best {bestStreakDays}" (11 / Medium, `TextTertiary`).
+- **Hours listened:** `headphones` SF Symbol (13pt, `TextSecondary`) + number Stat large (SF Rounded 24 / Semibold, `TextPrimary`) with unit "hrs" as Unit suffix (13 / Medium, `TextSecondary`) baseline-aligned. Caption "hours listened" (11 / Medium, `TextSecondary`). Value = `lifetimeSeconds / 3600`, one decimal.
+- **Current streak:** `flame.fill` SF Symbol (14pt, `Ember`) + number Stat large (SF Rounded 24 / Semibold, `EmberText`). Caption "day streak". Sub-caption "Best {bestStreakDays}" (11 / Medium, `TextTertiary`).
   - Streak = 0 state: flame in `Track` gray, number in `TextTertiary`, caption "Start today".
 
 Right block width: give both satellites equal height; the block occupies ~ 42% of the card width. Numbers left-aligned within their satellite.
@@ -156,19 +157,19 @@ Right block width: give both satellites equal height; the block occupies ~ 42% o
 
 **Rationale:** the current "Weekly goal" card and "This week" chart card both describe the same seven days. Merging removes the redundancy that makes the page feel padded, and creates one strong focal card.
 
-**Container:** full-width card, `CardBG`, default elevation, radius 14, padding 18/16. Vertical `NSStackView`, `alignment = .leading`, spacing 12.
+**Container:** full-width card, `CardBG`, default elevation, radius 14, padding 16/8. Vertical `NSStackView`, `alignment = .leading`, spacing 6.
 
 **Header row** (horizontal, `alignment = .centerY`, fills width):
 - Left: `chart.bar.fill` (13pt, `TextSecondary`) + title "This week" (Card title 15 / Semibold).
-- Right: goal readout `{wordsThisWeek} / {weeklyGoalWords}` (SF Rounded 13 / Semibold tabular; the numerator `TextPrimary`, the "/ goal" part `TextSecondary`) + the **progress ring** (see §9) at **56×56** to its right.
+- Right: goal readout `{wordsThisWeek} / {weeklyGoalWords}` (SF Rounded 13 / Semibold tabular; the numerator `TextPrimary`, the "/ goal" part `TextSecondary`) + the **progress ring** (see §9) at **40×40** to its right.
 
-**Body:** the weekly bar chart (see §5), height **150**, full card width.
+**Body:** the weekly bar chart (see §5), height **56**, full card width.
 
-**Footer row** (de-emphasized, separated from body by a 1px `Hairline` inset divider, 12pt above/below):
+**Footer row** (de-emphasized, separated from body by a 1px `Hairline` inset divider, with 6pt stack spacing):
 - `target` SF Symbol (12pt, `TextTertiary`) + "Weekly goal" (Caption 11 / Medium, `TextSecondary`) + `goalField` (NSTextField, right-aligned, 92pt wide, SF Rounded 12 / Medium tabular) + `goalStepper`.
 - **Cut** the helper sentence "Set a motivating target. Your goal stays on this Mac." The privacy pill in the header already carries that message.
 
-Ring and bars are not redundant here: the ring = goal completion at a glance; the bars = daily distribution. Keep the ring small (56pt) so bars remain the focus.
+Ring and bars are not redundant here: the ring = goal completion at a glance; the bars = daily distribution. Keep the ring small (40pt) so bars remain the focus.
 
 ---
 
@@ -207,13 +208,13 @@ Custom `draw(_:)`. Fix the three current defects: pill-shaped bars, all-seven va
 
 ## 6. Breakdown rows (`RankingListView` for "Where you read" / "Voices you pick")
 
-Two cards, 2-up, equal width, `distribution = .fillEqually`, gap 16, min height 226 (keep). Each card: `CardBG`, default elevation, padding 18/16, vertical stack spacing 12.
+Two cards, 2-up, equal width, `distribution = .fillEqually`, gap 12. Align card tops and let each card use its intrinsic content height; do not equalize their heights or impose a minimum height. Each card: `CardBG`, default elevation, padding 16/8, vertical stack spacing 6. Ranking-list row spacing is 4.
 
 **Card header:** SF Symbol + title (Card title 15 / Semibold). Sources card symbol `macwindow`; Voices card symbol `waveform`.
 
 **Each row (two lines, down from three):**
 - **Line 1:** `[identity symbol] Name … {percent}` — identity symbol (14pt, `TextSecondary`); name (Ranking name 12 / Medium, `TextPrimary`, truncate tail); flexible spacer; percent (Inline numeric SF Rounded 12 / Semibold tabular, `TextPrimary` — promote from secondary for emphasis), right-aligned, min 36pt wide. Tuck the raw count "· 1,240 words" after the name in 10 / Regular `TextTertiary` (truncates first).
-- **Line 2:** the bar — height **6** (up from 5), `Track` background, `Ember` fill, radius 3, full row width. `fraction` from `Ranked.fraction`.
+- **Line 2:** the bar — height **4**, `Track` background, `Ember` fill, radius 2, full row width. `fraction` from `Ranked.fraction`.
 
 **Rank emphasis:** row #1 name is Semibold and its bar is full `Ember`; rows 2+ use Ember at **75% alpha** for a gentle falloff so the eye lands on the leader.
 
@@ -231,7 +232,7 @@ Two cards, 2-up, equal width, `distribution = .fillEqually`, gap 16, min height 
 
 Turn the flat card into a "trophy" moment.
 
-**Container:** full-width card, `CardBG`, default elevation, padding 18/16. Vertical stack, spacing 10.
+**Container:** full-width card, `CardBG`, default elevation, padding 16/8. Vertical stack, spacing 4.
 
 - **Header:** `crown.fill` SF Symbol (13pt, `Ember`) + title "Longest read" (Card title 15 / Semibold).
 - **Title of the read:** `longest.title` — SF Pro Text **17 / Semibold**, `TextPrimary`, up to 2 lines, wrapping.
@@ -247,7 +248,7 @@ Turn the flat card into a "trophy" moment.
 
 Replaces the current three big summary tiles (`makeSummaryRow`). These are tertiary facts and must not compete with the hero.
 
-**Container:** one full-width card, `CardBG`, default elevation, height **72**, padding 0 (cells manage their own). Horizontal `NSStackView`, `distribution = .fillEqually`, three cells divided by 1px `Hairline` vertical rules (inset 14 top/bottom).
+**Container:** one full-width card, `CardBG`, default elevation, height **52**, padding 0 (cells manage their own). Horizontal `NSStackView`, `distribution = .fillEqually`, three cells divided by 1px `Hairline` vertical rules (34pt tall).
 
 **Each cell** (vertical, centered): number (Stat medium, SF Rounded 20 / Semibold tabular, `TextPrimary`) over caption (Caption 11 / Medium, `TextSecondary`), with a small leading SF Symbol on the caption:
 - `book.pages` + "reads" → `totalReads`
@@ -258,7 +259,7 @@ Replaces the current three big summary tiles (`makeSummaryRow`). These are terti
 
 ## 9. Progress ring (`WeeklyGoalRingView`)
 
-- Diameter **56** (inside the This-week header). Track and progress stroke **6pt** (down from 8), round caps.
+- Diameter **40** (inside the This-week header). Track and progress stroke **6pt** (down from 8), round caps.
 - Track color `Track`; progress color `Ember`. Progress arc starts at 12 o'clock, sweeps clockwise by `fraction` (`weeklyGoalFraction`).
 - Center label: `{percent}%`, SF Rounded **15 / Semibold**, `TextPrimary`, tabular.
 - **100% state:** fill the full ring in `Ember` and replace the "%" text with a `checkmark` SF Symbol (11pt, `Ember`), OR tint the number `EmberText` — pick the checkmark.
@@ -302,6 +303,10 @@ let font = NSFont(descriptor: tabular, size: size) ?? base
 Wrap this in one helper `Font.roundedTabular(_ size: CGFloat, _ weight: NSFont.Weight)` and use it for every stat numeral (hero, stat large/medium, percentages, deltas, tooltip values). Keep SF Pro Text (non-rounded) for words/labels.
 
 **Layout.** Keep `NSStackView` + Auto Layout throughout. Content column max-width: pin the content stack `centerX` to the document view and add `widthAnchor ≤ 780` plus leading/trailing `≥ gutter` at lower priority so it shrinks gracefully on narrow windows. Cards fill the column width. Existing per-card `widthAnchor == content.widthAnchor` constraints stay.
+
+The default window content size is **720×720pt**. The dashboard content uses
+10pt top and bottom insets; its scroll view remains as a fallback for
+restored smaller windows and accessibility-driven size changes.
 
 **SF Symbols.** `NSImage(systemSymbolName:accessibilityDescription:)` with `withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:weight:))`; tint by wrapping in an `NSImageView` with `contentTintColor = token`, or use `.applying(.init(paletteColors:))`. Place symbols in a horizontal `NSStackView` with their label, `alignment = .firstBaseline` (or `.centerY` for pills). Provide fallbacks for older symbol names if the deployment target predates them.
 

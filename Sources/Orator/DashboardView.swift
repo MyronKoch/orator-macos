@@ -272,24 +272,24 @@ final class DashboardView: NSView {
         content.translatesAutoresizingMaskIntoConstraints = false
         content.orientation = .vertical
         content.alignment = .leading
-        content.spacing = 16
+        content.spacing = 10
         documentView.addSubview(content)
 
         let header = makeHeaderBand()
         addFullWidth(header, to: content)
-        content.setCustomSpacing(28, after: header)
+        content.setCustomSpacing(10, after: header)
 
         let hero = makeHeroCard()
         addFullWidth(hero, to: content)
-        content.setCustomSpacing(28, after: hero)
+        content.setCustomSpacing(10, after: hero)
 
         let week = makeThisWeekCard()
         addFullWidth(week, to: content)
-        content.setCustomSpacing(28, after: week)
+        content.setCustomSpacing(10, after: week)
 
         let rankings = makeRankingsRow()
         addFullWidth(rankings, to: content)
-        content.setCustomSpacing(28, after: rankings)
+        content.setCustomSpacing(10, after: rankings)
 
         let longest = makeLongestCard()
         addFullWidth(longest, to: content)
@@ -342,8 +342,16 @@ final class DashboardView: NSView {
             preferredLeading,
             preferredTrailing,
             preferredWidth,
-            content.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 24),
-            content.bottomAnchor.constraint(equalTo: documentView.bottomAnchor, constant: -32),
+            content.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 10),
+            // lessThanOrEqualTo, NOT equalTo: the document view is forced to be
+            // at least the viewport tall, so pinning content to its bottom would
+            // stretch the stack to fill and inflate the one card without a fixed
+            // height (the week card) into a big empty gap. Let content keep its
+            // natural height; any slack becomes harmless space below the footer.
+            content.bottomAnchor.constraint(
+                lessThanOrEqualTo: documentView.bottomAnchor,
+                constant: -10
+            ),
         ])
     }
 
@@ -380,7 +388,7 @@ final class DashboardView: NSView {
     }
 
     private func makeHeroCard() -> DashboardCardView {
-        configureStatLabel(lifetimeWordsLabel, size: 44, weight: .bold)
+        configureStatLabel(lifetimeWordsLabel, size: 40, weight: .bold)
 
         let caption = NSTextField(labelWithString: "words read aloud")
         caption.font = .systemFont(ofSize: 12, weight: .medium)
@@ -407,12 +415,12 @@ final class DashboardView: NSView {
         lifetime.spacing = 4
 
         let divider = DashboardDividerView(.vertical)
-        divider.heightAnchor.constraint(equalToConstant: 80).isActive = true
+        divider.heightAnchor.constraint(equalToConstant: 70).isActive = true
 
-        configureStatLabel(hoursLabel, size: 30, weight: .semibold)
+        configureStatLabel(hoursLabel, size: 24, weight: .semibold)
         let hoursUnit = makeLabel(
             "hrs",
-            font: .systemFont(ofSize: 15, weight: .medium),
+            font: .systemFont(ofSize: 13, weight: .medium),
             color: DashboardTheme.textSecondary
         )
         let hoursNumbers = NSStackView(views: [hoursLabel, hoursUnit])
@@ -446,7 +454,7 @@ final class DashboardView: NSView {
 
         configureStatLabel(
             streakLabel,
-            size: 30,
+            size: 24,
             weight: .semibold,
             color: DashboardTheme.textTertiary
         )
@@ -500,10 +508,10 @@ final class DashboardView: NSView {
         let result = DashboardCardView(
             isHero: true,
             horizontalPadding: 20,
-            verticalPadding: 18
+            verticalPadding: 10
         )
         result.setContent(heroContent)
-        result.heightAnchor.constraint(equalToConstant: 140).isActive = true
+        result.heightAnchor.constraint(equalToConstant: 112).isActive = true
         let satelliteWidth = satellites.widthAnchor.constraint(
             equalTo: result.widthAnchor,
             multiplier: 0.42,
@@ -526,8 +534,8 @@ final class DashboardView: NSView {
 
         goalRing.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            goalRing.widthAnchor.constraint(equalToConstant: 56),
-            goalRing.heightAnchor.constraint(equalToConstant: 56),
+            goalRing.widthAnchor.constraint(equalToConstant: 40),
+            goalRing.heightAnchor.constraint(equalToConstant: 40),
         ])
         goalRing.setAccessibilityElement(true)
 
@@ -537,7 +545,7 @@ final class DashboardView: NSView {
         header.spacing = 12
 
         weekChart.translatesAutoresizingMaskIntoConstraints = false
-        weekChart.heightAnchor.constraint(equalToConstant: 150).isActive = true
+        weekChart.heightAnchor.constraint(equalToConstant: 88).isActive = true
 
         configureGoalControls()
         let footerSpacer = flexibleSpacer()
@@ -564,13 +572,13 @@ final class DashboardView: NSView {
         let stack = NSStackView(views: [header, weekChart, divider, footer])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 12
+        stack.spacing = 6
         header.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         weekChart.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         divider.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         footer.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
-        let result = DashboardCardView()
+        let result = DashboardCardView(horizontalPadding: 16, verticalPadding: 8)
         result.setContent(stack)
         return result
     }
@@ -604,7 +612,7 @@ final class DashboardView: NSView {
         ])
         sourceStack.orientation = .vertical
         sourceStack.alignment = .leading
-        sourceStack.spacing = 12
+        sourceStack.spacing = 6
         sourcesList.widthAnchor.constraint(equalTo: sourceStack.widthAnchor).isActive = true
 
         let voiceStack = NSStackView(views: [
@@ -613,21 +621,19 @@ final class DashboardView: NSView {
         ])
         voiceStack.orientation = .vertical
         voiceStack.alignment = .leading
-        voiceStack.spacing = 12
+        voiceStack.spacing = 6
         voicesList.widthAnchor.constraint(equalTo: voiceStack.widthAnchor).isActive = true
 
-        let sourceCard = DashboardCardView()
+        let sourceCard = DashboardCardView(horizontalPadding: 16, verticalPadding: 8)
         sourceCard.setContent(sourceStack)
-        let voiceCard = DashboardCardView()
+        let voiceCard = DashboardCardView(horizontalPadding: 16, verticalPadding: 8)
         voiceCard.setContent(voiceStack)
 
         let row = NSStackView(views: [sourceCard, voiceCard])
         row.orientation = .horizontal
         row.alignment = .top
-        row.spacing = 16
+        row.spacing = 12
         row.distribution = .fillEqually
-        sourceCard.heightAnchor.constraint(greaterThanOrEqualToConstant: 226).isActive = true
-        voiceCard.heightAnchor.constraint(equalTo: sourceCard.heightAnchor).isActive = true
         return row
     }
 
@@ -668,9 +674,9 @@ final class DashboardView: NSView {
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 10
+        stack.spacing = 4
 
-        let result = DashboardCardView()
+        let result = DashboardCardView(horizontalPadding: 16, verticalPadding: 8)
         result.setContent(stack)
         return result
     }
@@ -704,8 +710,8 @@ final class DashboardView: NSView {
 
         let dividerOne = DashboardDividerView(.vertical)
         let dividerTwo = DashboardDividerView(.vertical)
-        dividerOne.heightAnchor.constraint(equalToConstant: 44).isActive = true
-        dividerTwo.heightAnchor.constraint(equalToConstant: 44).isActive = true
+        dividerOne.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        dividerTwo.heightAnchor.constraint(equalToConstant: 34).isActive = true
 
         let row = NSStackView(views: [reads, dividerOne, average, dividerTwo, cast])
         row.orientation = .horizontal
@@ -722,7 +728,7 @@ final class DashboardView: NSView {
 
         let result = DashboardCardView(horizontalPadding: 0, verticalPadding: 0)
         result.setContent(row)
-        result.heightAnchor.constraint(equalToConstant: 72).isActive = true
+        result.heightAnchor.constraint(equalToConstant: 52).isActive = true
         return result
     }
 
@@ -1741,7 +1747,7 @@ private final class RankingListView: NSStackView {
         super.init(frame: .zero)
         orientation = .vertical
         alignment = .leading
-        spacing = 9
+        spacing = 4
         translatesAutoresizingMaskIntoConstraints = false
     }
 
@@ -1863,19 +1869,19 @@ private final class RankingRowView: NSView {
         bar.fraction = fraction
         bar.fillAlpha = isLeader ? 1 : 0.75
         bar.translatesAutoresizingMaskIntoConstraints = false
-        bar.heightAnchor.constraint(equalToConstant: 6).isActive = true
+        bar.heightAnchor.constraint(equalToConstant: 4).isActive = true
 
         let content = NSStackView(views: [top, bar])
         content.translatesAutoresizingMaskIntoConstraints = false
         content.orientation = .vertical
         content.alignment = .leading
-        content.spacing = 5
+        content.spacing = 2
         addSubview(content)
         NSLayoutConstraint.activate([
             content.leadingAnchor.constraint(equalTo: leadingAnchor),
             content.trailingAnchor.constraint(equalTo: trailingAnchor),
-            content.topAnchor.constraint(equalTo: topAnchor, constant: 2),
-            content.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            content.topAnchor.constraint(equalTo: topAnchor),
+            content.bottomAnchor.constraint(equalTo: bottomAnchor),
             top.widthAnchor.constraint(equalTo: content.widthAnchor),
             bar.widthAnchor.constraint(equalTo: content.widthAnchor),
         ])
@@ -1953,8 +1959,8 @@ private final class FractionBarView: NSView {
         super.draw(dirtyRect)
         let track = NSBezierPath(
             roundedRect: bounds,
-            xRadius: 3,
-            yRadius: 3
+            xRadius: 2,
+            yRadius: 2
         )
         DashboardTheme.track.setFill()
         track.fill()
@@ -1968,8 +1974,8 @@ private final class FractionBarView: NSView {
                 width: width,
                 height: bounds.height
             ),
-            xRadius: 3,
-            yRadius: 3
+            xRadius: 2,
+            yRadius: 2
         )
         DashboardTheme.ember.withAlphaComponent(fillAlpha).setFill()
         fill.fill()
