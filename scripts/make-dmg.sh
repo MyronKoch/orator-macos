@@ -57,5 +57,29 @@ if [ "${1:-}" = "--notarize" ]; then
   xcrun stapler validate "$DMG" && echo "    DMG notarized + stapled"
 fi
 
+# --- Sparkle update archive + appcast (release time) ---
+# Sparkle updates ship as a .app ZIP (best delta support); the DMG stays the
+# website/first-download artifact. generate_appcast signs each enclosure with
+# the EdDSA private key from the login keychain and writes appcast.xml, which is
+# committed to master (SUFeedURL points at raw master/appcast.xml). Enclosure
+# URLs point at this tag's GitHub release download. Keeping prior versions'
+# zips in the updates folder is what lets generate_appcast compute deltas, so a
+# code-only update is a small patch rather than the full ~320 MB.
+if [ "${1:-}" = "--notarize" ]; then
+  GEN=$(find .build/xcode/SourcePackages/artifacts/sparkle -name generate_appcast -path "*/bin/*" 2>/dev/null | head -1)
+  if [ -n "$GEN" ]; then
+    UPDATES="build/sparkle-updates"
+    mkdir -p "$UPDATES"
+    echo "==> Building Sparkle update zip + appcast…"
+    /usr/bin/ditto -c -k --keepParent "$APP" "$UPDATES/Orator-$VERSION.zip"
+    "$GEN" "$UPDATES" \
+      --download-url-prefix "https://github.com/MyronKoch/orator-macos/releases/download/v$VERSION/"
+    cp "$UPDATES/appcast.xml" appcast.xml
+    echo "    appcast.xml written -> commit+push to master; upload $UPDATES/Orator-$VERSION.zip to the release"
+  else
+    echo "    WARNING: generate_appcast not found (resolve packages first); appcast NOT generated"
+  fi
+fi
+
 du -h "$DMG"
 echo "==> Done: $DMG"
