@@ -24,6 +24,13 @@ enum MainMenu {
             action: "orderFrontStandardAboutPanel:"
         ))
         menu.addItem(.separator())
+        let checkForUpdatesItem = NSMenuItem(
+            title: "Check for Updates…",
+            action: #selector(AppDelegate.checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        checkForUpdatesItem.target = appDelegate
+        menu.addItem(checkForUpdatesItem)
         menu.addItem(item(
             title: "Settings…",
             action: "openOratorSettings",

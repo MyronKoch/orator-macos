@@ -1,6 +1,7 @@
 import Cocoa
 import AVFoundation
 import ServiceManagement
+import Sparkle
 import UniformTypeIdentifiers
 
 extension Notification.Name {
@@ -13,6 +14,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var shared: AppDelegate?
 
     // MARK: - State
+
+    let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
 
     private var statusItem: NSStatusItem!
     private var engine: OratorEngine?
@@ -152,6 +159,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         cleanupPreviewTempFile()
+    }
+
+    @objc func checkForUpdates(_ sender: Any?) {
+        updaterController.checkForUpdates(sender)
     }
 
     // MARK: - App Intents
