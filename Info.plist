@@ -22,9 +22,8 @@
 	<string>public.app-category.utilities</string>
 	<key>SUFeedURL</key>
 	<string>https://raw.githubusercontent.com/MyronKoch/orator-macos/master/appcast.xml</string>
-	<!-- SUPublicEDKey is added at release time from the developer's Sparkle
-	     EdDSA public key (generate_keys -p). Without it Sparkle cannot verify
-	     update signatures, so it is deliberately not committed with a placeholder. -->
+	<key>SUPublicEDKey</key>
+	<string>lgO0DQnJT0ZRp+ylj6RZEuIuclYNMLjAQCw2ujjVhnw=</string>
 
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
