@@ -31,6 +31,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Framewor
 cp "$PRODUCTS/Orator" "$APP/Contents/MacOS/"
 cp Info.plist "$APP/Contents/"
 cp -R "$PRODUCTS/PackageFrameworks/"*.framework "$APP/Contents/Frameworks/"
+# Sparkle builds directly into Release/, not PackageFrameworks/, so the glob
+# above misses it.
+[ -d "$PRODUCTS/Sparkle.framework" ] && cp -R "$PRODUCTS/Sparkle.framework" "$APP/Contents/Frameworks/"
 cp -R "$PRODUCTS/mlx-swift_Cmlx.bundle" "$APP/Contents/Resources/"
 [ -d "$PRODUCTS/KokoroSwift_KokoroSwift.bundle" ] && cp -R "$PRODUCTS/KokoroSwift_KokoroSwift.bundle" "$APP/Contents/Resources/"
 [ -d "$PRODUCTS/MisakiSwift_MisakiSwift.bundle" ] && cp -R "$PRODUCTS/MisakiSwift_MisakiSwift.bundle" "$APP/Contents/Resources/"
@@ -52,7 +55,21 @@ install_name_tool -add_rpath @executable_path/../Frameworks "$APP/Contents/MacOS
 if [ -n "$SIGN_IDENTITY" ]; then
   echo "==> Signing frameworks…"
   for fw in "$APP/Contents/Frameworks/"*.framework; do
-    codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$fw"
+    if [ "$(basename "$fw")" = "Sparkle.framework" ]; then
+      # Sparkle MUST be signed INSIDE-OUT and NEVER with --deep: its nested XPC
+      # services, Autoupdate helper, and Updater.app each carry their own
+      # signature, and --deep corrupts them. This is Sparkle's documented #1
+      # integration failure point.
+      V=$(ls -d "$fw/Versions/"[A-Z] 2>/dev/null | head -1)
+      codesign -f -o runtime --timestamp -s "$SIGN_IDENTITY" "$V/XPCServices/Installer.xpc"
+      codesign -f -o runtime --timestamp --preserve-metadata=entitlements \
+        -s "$SIGN_IDENTITY" "$V/XPCServices/Downloader.xpc"
+      codesign -f -o runtime --timestamp -s "$SIGN_IDENTITY" "$V/Autoupdate"
+      codesign -f -o runtime --timestamp -s "$SIGN_IDENTITY" "$V/Updater.app"
+      codesign -f -o runtime --timestamp -s "$SIGN_IDENTITY" "$fw"
+    else
+      codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$fw"
+    fi
   done
   echo "==> Signing app (hardened runtime)…"
   codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"

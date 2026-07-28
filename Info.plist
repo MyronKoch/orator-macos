@@ -20,6 +20,11 @@
 	<string>7</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/MyronKoch/orator-macos/master/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>lgO0DQnJT0ZRp+ylj6RZEuIuclYNMLjAQCw2ujjVhnw=</string>
+
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 	<key>NSHighResolutionCapable</key>
