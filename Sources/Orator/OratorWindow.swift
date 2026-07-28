@@ -161,7 +161,12 @@ final class OratorWindowController: NSWindowController, NSWindowDelegate,
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.setFrameAutosaveName("OratorWindow")
-        if !window.setFrameUsingName("OratorWindow") {
+        // Restore the saved frame, but if it lands off every current screen
+        // (a disconnected monitor, a changed display arrangement) recenter it -
+        // otherwise the window opens where the user can't see it.
+        let restored = window.setFrameUsingName("OratorWindow")
+        let onScreen = NSScreen.screens.contains { $0.visibleFrame.intersects(window.frame) }
+        if !restored || !onScreen {
             window.center()
         }
 
