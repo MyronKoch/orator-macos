@@ -152,7 +152,29 @@ final class OratorEngine: @unchecked Sendable {
             oratorLog("kitten: no model at \(dir.path) - running Kokoro-only")
             return nil
         }
-        if let provider = try? SherpaProvider(modelDir: dir) {
+        // sid -> name is VERIFIED (F0 fingerprint matched to the KittenTTS
+        // reference voices, plus by-ear confirmation). sherpa preserves the
+        // upstream `available_voices` row order, but KittenTTS's friendly names
+        // are assigned with each adjacent voice pair swapped, so this is NOT
+        // the KittenTTS all_voice_names order. Measured F0 (Hz), for reference:
+        // Jasper 171, Bella 222, Bruno 112 (the one clearly male), Luna 211,
+        // Hugo 175, Rosie 221, Leo 202, Kiki 250.
+        let voices = [
+            SherpaVoice(localID: "0", sid: 0, displayName: "Jasper (F)"),
+            SherpaVoice(localID: "1", sid: 1, displayName: "Bella (F)"),
+            SherpaVoice(localID: "2", sid: 2, displayName: "Bruno (M)"),
+            SherpaVoice(localID: "3", sid: 3, displayName: "Luna (F)"),
+            SherpaVoice(localID: "4", sid: 4, displayName: "Hugo (M)"),
+            SherpaVoice(localID: "5", sid: 5, displayName: "Rosie (F)"),
+            SherpaVoice(localID: "6", sid: 6, displayName: "Leo (F)"),
+            SherpaVoice(localID: "7", sid: 7, displayName: "Kiki (F)"),
+        ]
+        if let provider = try? SherpaProvider(
+            id: "kitten",
+            modelDir: dir,
+            kind: .kitten,
+            voices: voices
+        ) {
             oratorLog("kitten: loaded \(provider.voices().count) voices via sherpa-onnx (sr \(provider.sampleRate))")
             return provider
         }
