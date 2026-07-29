@@ -104,6 +104,19 @@ final class OratorEngine: @unchecked Sendable {
     /// once its sherpa-onnx model has been downloaded.
     var availableVoices: [VoiceInfo] { kokoro.voices() + (sherpa?.voices() ?? []) }
 
+    /// Kitten (sherpa-onnx) voices only, or empty when that engine isn't loaded.
+    /// Their ids are namespaced (`kitten:0`...); Kokoro voices stay bare names in
+    /// the picker for backward-compatible saved prefs, so the UI concatenates
+    /// `voiceNames` (bare Kokoro) with these.
+    var kittenVoices: [VoiceInfo] { sherpa?.voices() ?? [] }
+
+    /// Whether ANY installed provider can speak `voiceID` (bare Kokoro name or a
+    /// namespaced id like `kitten:0`). The picker uses this to validate a
+    /// selection across engines.
+    func canSpeak(voiceID: String) -> Bool {
+        provider(for: voiceID).canSpeak(voiceID: voiceID)
+    }
+
     /// Application Support directory where downloadable engine models live.
     static var modelsDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

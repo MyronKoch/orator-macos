@@ -938,6 +938,25 @@ private final class VoicesSettingsViewController: NSViewController {
             }
         }
 
+        let kittenVoices = appDelegate.kittenVoices
+        if !kittenVoices.isEmpty {
+            if !(voicePopup.menu?.items.isEmpty ?? true) {
+                voicePopup.menu?.addItem(.separator())
+            }
+            let header = NSMenuItem(title: "KittenTTS (beta)", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            voicePopup.menu?.addItem(header)
+            for voice in kittenVoices {
+                let item = NSMenuItem(
+                    title: appDelegate.displayName(for: voice.id),
+                    action: nil,
+                    keyEquivalent: ""
+                )
+                item.representedObject = voice.id
+                voicePopup.menu?.addItem(item)
+            }
+        }
+
         if let index = voicePopup.menu?.items.firstIndex(where: {
             ($0.representedObject as? String) == appDelegate.selectedVoiceName
         }) {
