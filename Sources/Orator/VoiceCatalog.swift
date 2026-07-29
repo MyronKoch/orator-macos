@@ -29,106 +29,106 @@ enum VoiceCatalog {
             approxSizeMB: 90
         ),
         piper(
-            archive: "vits-piper-en_US-amy-medium-fp16",
+            archive: "vits-piper-en_US-amy-medium",
             localID: "amy",
             displayName: "Amy (F)",
-            approxSizeMB: 34
+            approxSizeMB: 64
         ),
         piper(
-            archive: "vits-piper-en_US-arctic-medium-fp16",
+            archive: "vits-piper-en_US-arctic-medium",
             localID: "arctic",
             displayName: "Arctic (M)",
-            approxSizeMB: 40
+            approxSizeMB: 77
         ),
         piper(
-            archive: "vits-piper-en_US-bryce-medium-fp16",
+            archive: "vits-piper-en_US-bryce-medium",
             localID: "bryce",
             displayName: "Bryce (M)",
-            approxSizeMB: 34
+            approxSizeMB: 64
         ),
         piper(
-            archive: "vits-piper-en_US-danny-low-fp16",
+            archive: "vits-piper-en_US-danny-low",
             localID: "danny",
             displayName: "Danny (M)",
-            approxSizeMB: 34
+            approxSizeMB: 64
         ),
         piper(
-            archive: "vits-piper-en_US-hfc_female-medium-fp16",
+            archive: "vits-piper-en_US-hfc_female-medium",
             localID: "hfc_female",
             displayName: "HFC Female (F)",
-            approxSizeMB: 34
+            approxSizeMB: 64
         ),
         piper(
-            archive: "vits-piper-en_US-hfc_male-medium-fp16",
+            archive: "vits-piper-en_US-hfc_male-medium",
             localID: "hfc_male",
             displayName: "HFC Male (M)",
-            approxSizeMB: 34
+            approxSizeMB: 64
         ),
         piper(
-            archive: "vits-piper-en_US-joe-medium-fp16",
+            archive: "vits-piper-en_US-joe-medium",
             localID: "joe",
             displayName: "Joe (M)",
-            approxSizeMB: 34
+            approxSizeMB: 64
         ),
         piper(
-            archive: "vits-piper-en_US-john-medium-fp16",
+            archive: "vits-piper-en_US-john-medium",
             localID: "john",
             displayName: "John (M)",
-            approxSizeMB: 34
+            approxSizeMB: 64
         ),
         piper(
-            archive: "vits-piper-en_US-kathleen-low-fp16",
+            archive: "vits-piper-en_US-kathleen-low",
             localID: "kathleen",
             displayName: "Kathleen (F)",
-            approxSizeMB: 34
+            approxSizeMB: 64
         ),
         piper(
-            archive: "vits-piper-en_US-kristin-medium-fp16",
+            archive: "vits-piper-en_US-kristin-medium",
             localID: "kristin",
             displayName: "Kristin (F)",
-            approxSizeMB: 34
+            approxSizeMB: 64
         ),
         piper(
-            archive: "vits-piper-en_US-kusal-medium-fp16",
+            archive: "vits-piper-en_US-kusal-medium",
             localID: "kusal",
             displayName: "Kusal (M)",
-            approxSizeMB: 34
+            approxSizeMB: 64
         ),
         piper(
-            archive: "vits-piper-en_US-lessac-medium-fp16",
+            archive: "vits-piper-en_US-lessac-medium",
             localID: "lessac",
             displayName: "Lessac (F)",
-            approxSizeMB: 34
+            approxSizeMB: 64
         ),
         piper(
-            archive: "vits-piper-en_US-ljspeech-medium-fp16",
+            archive: "vits-piper-en_US-ljspeech-medium",
             localID: "ljspeech",
             displayName: "LJSpeech (F)",
-            approxSizeMB: 34
+            approxSizeMB: 64
         ),
         piper(
-            archive: "vits-piper-en_US-norman-medium-fp16",
+            archive: "vits-piper-en_US-norman-medium",
             localID: "norman",
             displayName: "Norman (M)",
-            approxSizeMB: 34
+            approxSizeMB: 64
         ),
         piper(
-            archive: "vits-piper-en_US-reza_ibrahim-medium-fp16",
+            archive: "vits-piper-en_US-reza_ibrahim-medium",
             localID: "reza_ibrahim",
             displayName: "Reza (M)",
-            approxSizeMB: 34
+            approxSizeMB: 64
         ),
         piper(
-            archive: "vits-piper-en_US-ryan-medium-fp16",
+            archive: "vits-piper-en_US-ryan-medium",
             localID: "ryan",
             displayName: "Ryan (M)",
-            approxSizeMB: 34
+            approxSizeMB: 64
         ),
         piper(
-            archive: "vits-piper-en_US-sam-medium-fp16",
+            archive: "vits-piper-en_US-sam-medium",
             localID: "sam",
             displayName: "Sam (M)",
-            approxSizeMB: 34
+            approxSizeMB: 64
         ),
     ]
 
