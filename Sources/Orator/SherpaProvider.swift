@@ -2,9 +2,8 @@ import Foundation
 
 /// KittenTTS behind the `TTSProvider` seam, backed by sherpa-onnx.
 ///
-/// The model is loaded from a local directory. Download-on-demand support will
-/// be added later. Kitten does not report word timings, and its speaker-id to
-/// display-name mapping is tentative pending by-ear verification.
+/// The model is loaded from a local directory. Kitten does not report word
+/// timings.
 final class SherpaProvider: TTSProvider, @unchecked Sendable {
 
     let id = "kitten"
@@ -40,8 +39,8 @@ final class SherpaProvider: TTSProvider, @unchecked Sendable {
         // reference: Jasper 171, Bella 222, Bruno 112 (the one clearly male),
         // Luna 211, Hugo 175, Rosie 221, Leo 202, Kiki 250.
         let displayNames = [
-            "Jasper", "Bella", "Bruno", "Luna",
-            "Hugo", "Rosie", "Leo", "Kiki",
+            "Jasper (F)", "Bella (F)", "Bruno (M)", "Luna (F)",
+            "Hugo (F)", "Rosie (F)", "Leo (F)", "Kiki (F)",
         ]
         return displayNames.enumerated().map { sid, displayName in
             VoiceInfo(

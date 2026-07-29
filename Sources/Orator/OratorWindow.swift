@@ -666,6 +666,13 @@ private final class VoicesSettingsViewController: NSViewController {
     private unowned let appDelegate: AppDelegate
     private let voicePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let speedPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let kittenDownloadRow = NSStackView()
+    private let kittenDownloadButton = NSButton(
+        title: "Download", target: nil, action: nil
+    )
+    private let kittenDownloadProgress = NSProgressIndicator()
+    private let kittenDownloadPercent = NSTextField(labelWithString: "")
+    private var isKittenDownloadInFlight = false
     private let autoCastCheckbox = NSButton(
         checkboxWithTitle: "Dramatize dialogue", target: nil, action: nil
     )
@@ -782,12 +789,41 @@ private final class VoicesSettingsViewController: NSViewController {
         ])
         globalBox.contentView = boxContent
 
+        let kittenDownloadLabel = NSTextField(
+            labelWithString: "KittenTTS voices (beta) - ~90 MB"
+        )
+        kittenDownloadLabel.font = .systemFont(ofSize: 12)
+        kittenDownloadButton.target = self
+        kittenDownloadButton.action = #selector(downloadKittenVoices)
+        kittenDownloadButton.bezelStyle = .rounded
+        kittenDownloadButton.controlSize = .small
+        kittenDownloadProgress.isIndeterminate = false
+        kittenDownloadProgress.minValue = 0
+        kittenDownloadProgress.maxValue = 100
+        kittenDownloadProgress.controlSize = .small
+        kittenDownloadProgress.isHidden = true
+        kittenDownloadProgress.widthAnchor.constraint(equalToConstant: 110).isActive = true
+        kittenDownloadPercent.font = .monospacedDigitSystemFont(
+            ofSize: 11,
+            weight: .regular
+        )
+        kittenDownloadPercent.textColor = .secondaryLabelColor
+        kittenDownloadPercent.isHidden = true
+        kittenDownloadRow.orientation = .horizontal
+        kittenDownloadRow.alignment = .centerY
+        kittenDownloadRow.spacing = 8
+        kittenDownloadRow.addArrangedSubview(kittenDownloadLabel)
+        kittenDownloadRow.addArrangedSubview(kittenDownloadButton)
+        kittenDownloadRow.addArrangedSubview(kittenDownloadProgress)
+        kittenDownloadRow.addArrangedSubview(kittenDownloadPercent)
+
         stack.addArrangedSubview(heading)
         stack.addArrangedSubview(helper)
         stack.setCustomSpacing(20, after: helper)
         stack.addArrangedSubview(autoCastControls)
         autoCastHelp.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         stack.addArrangedSubview(globalBox)
+        stack.addArrangedSubview(kittenDownloadRow)
         let auditionHint = NSTextField(
             wrappingLabelWithString: "Tip: press [ or ] to step through voices and hear each one instantly."
         )
@@ -893,6 +929,7 @@ private final class VoicesSettingsViewController: NSViewController {
     }
 
     private func rebuildVoiceMenu() {
+        kittenDownloadRow.isHidden = appDelegate.isKittenAvailable
         voicePopup.removeAllItems()
         let voices = appDelegate.availableVoiceNames
         let groups: [(title: String, prefix: String)] = [
@@ -1004,6 +1041,48 @@ private final class VoicesSettingsViewController: NSViewController {
 
     @objc private func previewVoice() {
         appDelegate.previewVoice(appDelegate.selectedVoiceName, speed: appDelegate.selectedSpeed)
+    }
+
+    @objc private func downloadKittenVoices() {
+        guard !isKittenDownloadInFlight else { return }
+        isKittenDownloadInFlight = true
+        kittenDownloadButton.isEnabled = false
+        kittenDownloadProgress.doubleValue = 0
+        kittenDownloadProgress.isHidden = false
+        kittenDownloadPercent.stringValue = "0%"
+        kittenDownloadPercent.isHidden = false
+
+        appDelegate.downloadKittenVoices(
+            progress: { [weak self] fraction in
+                guard let self else { return }
+                let percent = Int((fraction * 100).rounded())
+                self.kittenDownloadProgress.doubleValue = Double(percent)
+                self.kittenDownloadPercent.stringValue = "\(percent)%"
+            },
+            completion: { [weak self] result in
+                guard let self else { return }
+                self.isKittenDownloadInFlight = false
+                self.kittenDownloadButton.isEnabled = true
+                self.kittenDownloadProgress.isHidden = true
+                self.kittenDownloadPercent.isHidden = true
+
+                switch result {
+                case .success:
+                    self.refresh()
+                case .failure(let error):
+                    let alert = NSAlert()
+                    alert.messageText = "KittenTTS download failed"
+                    alert.informativeText = error.localizedDescription
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "OK")
+                    if let window = self.view.window {
+                        alert.beginSheetModal(for: window)
+                    } else {
+                        alert.runModal()
+                    }
+                }
+            }
+        )
     }
 }
 
