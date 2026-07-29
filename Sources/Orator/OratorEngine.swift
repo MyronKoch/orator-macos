@@ -64,7 +64,18 @@ final class OratorEngine: @unchecked Sendable {
     /// the provider supplies PCM, this class still owns scheduling and the
     /// generation/lock/scheduledBuffers/synthesisDone/speaking state machine.
     private let kokoro: KokoroProvider
-    private var provider: TTSProvider { kokoro }
+    /// Optional second engine: KittenTTS via sherpa-onnx. nil until its model is
+    /// present in the models dir - the app runs Kokoro-only until then.
+    private let sherpa: SherpaProvider?
+
+    /// Resolve the provider that owns `voiceID` by its namespace (`kitten:...`
+    /// routes to sherpa, everything else to Kokoro, the bundled default). Pure
+    /// and reads only immutable `let`s, so it is safe to call from the synth
+    /// queue with no locking.
+    private func provider(for voiceID: String) -> TTSProvider {
+        if VoiceInfo.providerID(of: voiceID) == "kitten", let sherpa { return sherpa }
+        return kokoro
+    }
     private let audioEngine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let format: AVAudioFormat
@@ -89,8 +100,32 @@ final class OratorEngine: @unchecked Sendable {
     var voiceNames: [String] { kokoro.localVoiceNames }
 
     /// Every voice across all installed providers, namespaced. The picker UI
-    /// can group these by `provider` once a second provider exists.
-    var availableVoices: [VoiceInfo] { provider.voices() }
+    /// can group these by `provider`. Kokoro (bundled) always; Kitten appears
+    /// once its sherpa-onnx model has been downloaded.
+    var availableVoices: [VoiceInfo] { kokoro.voices() + (sherpa?.voices() ?? []) }
+
+    /// Application Support directory where downloadable engine models live.
+    static var modelsDirectory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("Orator/models", isDirectory: true)
+    }
+
+    /// Load the KittenTTS (sherpa-onnx) provider if its model is on disk,
+    /// otherwise nil. Never throws - a missing or broken model simply means the
+    /// app runs Kokoro-only.
+    private static func loadKittenProvider() -> SherpaProvider? {
+        let dir = modelsDirectory.appendingPathComponent("kitten-mini-en-v0_8", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: dir.appendingPathComponent("model.onnx").path) else {
+            oratorLog("kitten: no model at \(dir.path) - running Kokoro-only")
+            return nil
+        }
+        if let provider = try? SherpaProvider(modelDir: dir) {
+            oratorLog("kitten: loaded \(provider.voices().count) voices via sherpa-onnx (sr \(provider.sampleRate))")
+            return provider
+        }
+        oratorLog("kitten: model present but failed to load")
+        return nil
+    }
 
     var isSpeaking: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -168,6 +203,7 @@ final class OratorEngine: @unchecked Sendable {
 
     init(modelPath: URL, voicesPath: URL) throws {
         kokoro = try KokoroProvider(modelPath: modelPath, voicesPath: voicesPath)
+        sherpa = OratorEngine.loadKittenProvider()
 
         format = AVAudioFormat(
             standardFormatWithSampleRate: kokoro.sampleRate,
@@ -358,13 +394,13 @@ final class OratorEngine: @unchecked Sendable {
             }
             do {
                 guard !chunks.isEmpty else { throw OratorError.noTextToExport }
-                guard provider.canSpeak(voiceID: voiceKey) else {
+                guard provider(for: voiceKey).canSpeak(voiceID: voiceKey) else {
                     throw OratorError.voiceNotFound(voiceKey)
                 }
 
                 let settings: [String: Any] = [
                     AVFormatIDKey: kAudioFormatMPEG4AAC,
-                    AVSampleRateKey: provider.sampleRate,
+                    AVSampleRateKey: provider(for: voiceKey).sampleRate,
                     AVNumberOfChannelsKey: 1,
                     AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
                 ]
@@ -379,7 +415,7 @@ final class OratorEngine: @unchecked Sendable {
 
                     let total = chunks.count
                     for (index, chunk) in chunks.enumerated() {
-                        let samples = try provider.synthesize(
+                        let samples = try provider(for: voiceKey).synthesize(
                             text: chunk, voiceID: voiceKey, speed: spd
                         ).samples
                         if !samples.isEmpty,
@@ -431,7 +467,7 @@ final class OratorEngine: @unchecked Sendable {
     func speak(chunks: [String]) throws -> Int {
         guard !chunks.isEmpty else { return -1 }
 
-        guard provider.canSpeak(voiceID: currentVoice) else {
+        guard provider(for: currentVoice).canSpeak(voiceID: currentVoice) else {
             oratorLog("speak: lookup failed for \(currentVoice); available: \(Array(voiceNames.prefix(4)))")
             throw OratorError.voiceNotFound(currentVoice)
         }
@@ -446,10 +482,10 @@ final class OratorEngine: @unchecked Sendable {
     /// utterance ID, or -1 if there was nothing to say.
     @discardableResult
     func speak(segments: [SpeechSegment]) throws -> Int {
-        let fallback = provider.canSpeak(voiceID: currentVoice) ? currentVoice : nil
+        let fallback = provider(for: currentVoice).canSpeak(voiceID: currentVoice) ? currentVoice : nil
         var items: [VoicedChunk] = []
         for segment in segments {
-            let resolved = provider.canSpeak(voiceID: segment.voiceName)
+            let resolved = provider(for: segment.voiceName).canSpeak(voiceID: segment.voiceName)
                 ? segment.voiceName
                 : fallback
             guard let voiceID = resolved else { continue }
@@ -488,7 +524,7 @@ final class OratorEngine: @unchecked Sendable {
             var offset: TimeInterval = 0
             for (chunkIndex, item) in items.enumerated() {
                 if isCancelled(gen) { return }
-                guard let synthesis = try? provider.synthesize(
+                guard let synthesis = try? provider(for: item.voiceID).synthesize(
                     text: item.text, voiceID: item.voiceID, speed: item.speed ?? defaultSpeed
                 ), !synthesis.samples.isEmpty else { continue }
                 if isCancelled(gen) { return }
@@ -546,7 +582,10 @@ final class OratorEngine: @unchecked Sendable {
         sampleCount: Int,
         generation gen: Int
     ) -> TimeInterval {
-        let duration = Double(sampleCount) / provider.sampleRate
+        // Playback rate, not the provider's: samples are scheduled at the audio
+        // engine's fixed format (all providers emit at that rate), so the heard
+        // duration is sampleCount / the engine format's rate.
+        let duration = Double(sampleCount) / format.sampleRate
         guard let callback = onChunkTiming, !isCancelled(gen) else { return duration }
         let words = words ?? []
         let timing = ChunkTiming(
