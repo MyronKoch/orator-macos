@@ -1255,6 +1255,9 @@ private final class GeneralSettingsViewController: NSViewController {
     private let continuousCheckbox = NSButton(
         checkboxWithTitle: "Continuous reading", target: nil, action: nil
     )
+    private let kokoroCheckbox = NSButton(
+        checkboxWithTitle: "Disable Kokoro (frees ~380 MB RAM)", target: nil, action: nil
+    )
     private let historyStack = NSStackView()
     private var historyTexts: [String] = []
 
@@ -1284,9 +1287,12 @@ private final class GeneralSettingsViewController: NSViewController {
         rememberCheckbox.action = #selector(toggleRememberReading(_:))
         continuousCheckbox.target = self
         continuousCheckbox.action = #selector(toggleContinuousReading(_:))
+        kokoroCheckbox.target = self
+        kokoroCheckbox.action = #selector(toggleKokoro(_:))
         content.addArrangedSubview(loginCheckbox)
         content.addArrangedSubview(rememberCheckbox)
         content.addArrangedSubview(continuousCheckbox)
+        content.addArrangedSubview(kokoroCheckbox)
 
         let rememberHelp = NSTextField(
             wrappingLabelWithString: "Reading history and Dashboard stats are stored locally only when “Remember my reading” is on."
@@ -1353,6 +1359,13 @@ private final class GeneralSettingsViewController: NSViewController {
         loginCheckbox.state = appDelegate.startAtLoginEnabled ? .on : .off
         rememberCheckbox.state = appDelegate.remembersReading ? .on : .off
         continuousCheckbox.state = appDelegate.continuousReadingEnabled ? .on : .off
+        kokoroCheckbox.state = appDelegate.kokoroDisabled ? .on : .off
+        let needsAlternativeVoice = !appDelegate.hasNonKokoroVoiceInstalled
+            && appDelegate.isKokoroEnabled
+        kokoroCheckbox.isEnabled = !needsAlternativeVoice
+        kokoroCheckbox.toolTip = needsAlternativeVoice
+            ? "Download a Piper or Kitten voice first"
+            : nil
         rebuildHistory()
     }
 
@@ -1399,6 +1412,11 @@ private final class GeneralSettingsViewController: NSViewController {
     @objc private func toggleContinuousReading(_ sender: NSButton) {
         appDelegate.setContinuousReading(sender.state == .on)
         refresh()
+    }
+
+    @objc private func toggleKokoro(_ sender: NSButton) {
+        appDelegate.setKokoroDisabled(sender.state == .on)
+        sender.state = appDelegate.kokoroDisabled ? .on : .off
     }
 
     @objc private func clearReadingHistory() {
