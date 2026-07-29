@@ -3,39 +3,25 @@ import Foundation
 actor KittenDownloader {
 
     private static let shared = KittenDownloader()
-    private static let modelDirectoryName = "kitten-mini-en-v0_8"
-    private static let archives = [
-        (
-            name: "KittenTTS model",
-            url: URL(
-                string: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kitten-mini-en-v0_8.tar.bz2"
-            )!
-        ),
-        (
-            name: "eSpeak NG data",
-            url: URL(
-                string: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/espeak-ng-data.tar.bz2"
-            )!
-        ),
-    ]
+    private static let releaseBaseURL = URL(
+        string: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/"
+    )!
 
     static func download(
+        _ model: CatalogModel,
         progress: @escaping @MainActor @Sendable (Double) -> Void
     ) async throws {
-        try await shared.performDownload(progress: progress)
+        try await shared.performDownload(model, progress: progress)
     }
 
     private func performDownload(
+        _ model: CatalogModel,
         progress: @escaping @MainActor @Sendable (Double) -> Void
     ) async throws {
         let fileManager = FileManager.default
         let modelsDirectory = OratorEngine.modelsDirectory
-        let finalModelDirectory = modelsDirectory.appendingPathComponent(
-            Self.modelDirectoryName,
-            isDirectory: true
-        )
-        let finalModel = finalModelDirectory.appendingPathComponent("model.onnx")
-        guard !fileManager.fileExists(atPath: finalModel.path) else { return }
+        let finalModelDirectory = VoiceCatalog.installDir(for: model)
+        guard !containsModel(at: finalModelDirectory) else { return }
 
         do {
             try fileManager.createDirectory(
@@ -43,14 +29,14 @@ actor KittenDownloader {
                 withIntermediateDirectories: true
             )
         } catch {
-            throw KittenDownloadError.fileOperation(
+            throw CatalogDownloadError.fileOperation(
                 "Could not create the Orator models directory",
                 error
             )
         }
 
         let temporaryDirectory = modelsDirectory.appendingPathComponent(
-            ".kitten-download-\(UUID().uuidString)",
+            ".catalog-download-\(UUID().uuidString)",
             isDirectory: true
         )
         do {
@@ -59,16 +45,34 @@ actor KittenDownloader {
                 withIntermediateDirectories: false
             )
         } catch {
-            throw KittenDownloadError.fileOperation(
-                "Could not create a temporary KittenTTS download directory",
+            throw CatalogDownloadError.fileOperation(
+                "Could not create a temporary model download directory",
                 error
             )
         }
         defer { try? fileManager.removeItem(at: temporaryDirectory) }
 
+        let modelArchive = Archive(
+            name: model.archive,
+            url: Self.releaseBaseURL.appendingPathComponent(
+                "\(model.archive).tar.bz2"
+            )
+        )
+        var archives = [modelArchive]
+        if model.needsEspeakData {
+            archives.append(
+                Archive(
+                    name: "eSpeak NG data",
+                    url: Self.releaseBaseURL.appendingPathComponent(
+                        "espeak-ng-data.tar.bz2"
+                    )
+                )
+            )
+        }
+
         await progress(0)
-        var archiveURLs: [URL] = []
-        for (index, archive) in Self.archives.enumerated() {
+        var downloadedArchives: [URL] = []
+        for (index, archive) in archives.enumerated() {
             let destination = temporaryDirectory.appendingPathComponent(
                 archive.url.lastPathComponent
             )
@@ -76,16 +80,16 @@ actor KittenDownloader {
                 try await download(
                     archive.url,
                     to: destination,
-                    baseProgress: Double(index) / Double(Self.archives.count),
-                    progressWeight: 1.0 / Double(Self.archives.count),
+                    baseProgress: Double(index) / Double(archives.count),
+                    progressWeight: 1.0 / Double(archives.count),
                     progress: progress
                 )
-            } catch let error as KittenDownloadError {
+            } catch let error as CatalogDownloadError {
                 throw error
             } catch {
-                throw KittenDownloadError.downloadFailed(archive.name, error)
+                throw CatalogDownloadError.downloadFailed(archive.name, error)
             }
-            archiveURLs.append(destination)
+            downloadedArchives.append(destination)
         }
 
         let stagingDirectory = temporaryDirectory.appendingPathComponent(
@@ -97,63 +101,64 @@ actor KittenDownloader {
                 at: stagingDirectory,
                 withIntermediateDirectories: false
             )
-            try extract(
-                archiveURLs[0],
-                named: Self.archives[0].name,
-                to: stagingDirectory
-            )
-            try extract(
-                archiveURLs[1],
-                named: Self.archives[1].name,
-                to: stagingDirectory
-            )
-        } catch let error as KittenDownloadError {
+            for (archive, downloadedArchive) in zip(
+                archives,
+                downloadedArchives
+            ) {
+                try extract(
+                    downloadedArchive,
+                    named: archive.name,
+                    to: stagingDirectory
+                )
+            }
+        } catch let error as CatalogDownloadError {
             throw error
         } catch {
-            throw KittenDownloadError.fileOperation(
-                "Could not stage the KittenTTS model",
+            throw CatalogDownloadError.fileOperation(
+                "Could not stage \(model.archive)",
                 error
             )
         }
 
         let stagedModelDirectory = stagingDirectory.appendingPathComponent(
-            Self.modelDirectoryName,
+            model.archive,
             isDirectory: true
         )
-        let stagedEspeakDirectory = stagingDirectory.appendingPathComponent(
-            "espeak-ng-data",
-            isDirectory: true
-        )
-        let modelEspeakDirectory = stagedModelDirectory.appendingPathComponent(
-            "espeak-ng-data",
-            isDirectory: true
-        )
+        guard containsModel(at: stagedModelDirectory) else {
+            throw CatalogDownloadError.missingRequiredFile(
+                "\(model.archive)/*.onnx"
+            )
+        }
 
-        guard fileManager.fileExists(
-            atPath: stagedModelDirectory.appendingPathComponent("model.onnx").path
-        ) else {
-            throw KittenDownloadError.missingRequiredFile("model.onnx")
-        }
-        for filename in ["voices.bin", "tokens.txt"] {
-            guard fileManager.fileExists(
-                atPath: stagedModelDirectory.appendingPathComponent(filename).path
-            ) else {
-                throw KittenDownloadError.missingRequiredFile(filename)
+        if model.needsEspeakData {
+            let stagedEspeakDirectory = stagingDirectory.appendingPathComponent(
+                "espeak-ng-data",
+                isDirectory: true
+            )
+            let modelEspeakDirectory = stagedModelDirectory.appendingPathComponent(
+                "espeak-ng-data",
+                isDirectory: true
+            )
+            guard fileManager.fileExists(atPath: stagedEspeakDirectory.path) else {
+                throw CatalogDownloadError.missingRequiredFile("espeak-ng-data")
             }
-        }
-        guard fileManager.fileExists(atPath: stagedEspeakDirectory.path) else {
-            throw KittenDownloadError.missingRequiredFile("espeak-ng-data")
+            do {
+                if fileManager.fileExists(atPath: modelEspeakDirectory.path) {
+                    try fileManager.removeItem(at: modelEspeakDirectory)
+                }
+                try fileManager.moveItem(
+                    at: stagedEspeakDirectory,
+                    to: modelEspeakDirectory
+                )
+            } catch {
+                throw CatalogDownloadError.fileOperation(
+                    "Could not install eSpeak NG data into \(model.archive)",
+                    error
+                )
+            }
         }
 
         do {
-            if fileManager.fileExists(atPath: modelEspeakDirectory.path) {
-                try fileManager.removeItem(at: modelEspeakDirectory)
-            }
-            try fileManager.moveItem(
-                at: stagedEspeakDirectory,
-                to: modelEspeakDirectory
-            )
-
             if fileManager.fileExists(atPath: finalModelDirectory.path) {
                 let previousDirectory = temporaryDirectory.appendingPathComponent(
                     "previous-model",
@@ -182,16 +187,26 @@ actor KittenDownloader {
                 )
             }
         } catch {
-            throw KittenDownloadError.fileOperation(
-                "Could not install the KittenTTS model",
+            throw CatalogDownloadError.fileOperation(
+                "Could not install \(model.archive)",
                 error
             )
         }
 
-        guard fileManager.fileExists(atPath: finalModel.path) else {
-            throw KittenDownloadError.missingRequiredFile("model.onnx")
+        guard containsModel(at: finalModelDirectory) else {
+            throw CatalogDownloadError.missingRequiredFile(
+                "\(model.archive)/*.onnx"
+            )
         }
         await progress(1)
+    }
+
+    private func containsModel(at directory: URL) -> Bool {
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else { return false }
+        return contents.contains { $0.pathExtension.lowercased() == "onnx" }
     }
 
     private func download(
@@ -205,14 +220,14 @@ actor KittenDownloader {
         guard let response = response as? HTTPURLResponse,
               (200..<300).contains(response.statusCode) else {
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw KittenDownloadError.httpFailure(source, status)
+            throw CatalogDownloadError.httpFailure(source, status)
         }
 
         guard FileManager.default.createFile(
             atPath: destination.path,
             contents: nil
         ) else {
-            throw KittenDownloadError.fileOperation(
+            throw CatalogDownloadError.fileOperation(
                 "Could not create \(destination.lastPathComponent)",
                 nil
             )
@@ -247,7 +262,11 @@ actor KittenDownloader {
         await progress(baseProgress + progressWeight)
     }
 
-    private func extract(_ archive: URL, named name: String, to destination: URL) throws {
+    private func extract(
+        _ archive: URL,
+        named name: String,
+        to destination: URL
+    ) throws {
         let errorPipe = Pipe()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
@@ -258,23 +277,28 @@ actor KittenDownloader {
             try process.run()
             process.waitUntilExit()
         } catch {
-            throw KittenDownloadError.extractionLaunchFailed(name, error)
+            throw CatalogDownloadError.extractionLaunchFailed(name, error)
         }
 
         guard process.terminationStatus == 0 else {
             let data = errorPipe.fileHandleForReading.readDataToEndOfFile()
             let detail = String(data: data, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            throw KittenDownloadError.extractionFailed(
+            throw CatalogDownloadError.extractionFailed(
                 name,
                 process.terminationStatus,
                 detail
             )
         }
     }
+
+    private struct Archive {
+        let name: String
+        let url: URL
+    }
 }
 
-private enum KittenDownloadError: LocalizedError {
+private enum CatalogDownloadError: LocalizedError {
     case downloadFailed(String, Error)
     case httpFailure(URL, Int)
     case extractionLaunchFailed(String, Error)
@@ -294,7 +318,7 @@ private enum KittenDownloadError: LocalizedError {
             let suffix = detail.map { ": \($0)" } ?? ""
             return "Could not extract \(name) - tar exited with status \(status)\(suffix)"
         case .missingRequiredFile(let filename):
-            return "The downloaded KittenTTS archive is missing \(filename)"
+            return "The downloaded model archive is missing \(filename)"
         case .fileOperation(let message, let error):
             guard let error else { return message }
             return "\(message): \(error.localizedDescription)"

@@ -475,10 +475,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         progress: @escaping @MainActor @Sendable (Double) -> Void,
         completion: @escaping @MainActor @Sendable (Result<Void, Error>) -> Void
     ) {
+        let kitten = VoiceCatalog.models.first {
+            $0.archive == "kitten-mini-en-v0_8"
+        }!
+        downloadCatalogModel(
+            kitten,
+            progress: progress,
+            completion: completion
+        )
+    }
+
+    func downloadCatalogModel(
+        _ model: CatalogModel,
+        progress: @escaping @MainActor @Sendable (Double) -> Void,
+        completion: @escaping @MainActor @Sendable (Result<Void, Error>) -> Void
+    ) {
         Task {
             do {
-                try await KittenDownloader.download(progress: progress)
-                engine?.reloadKittenProvider()
+                try await KittenDownloader.download(model, progress: progress)
+                engine?.reloadCatalog()
                 completion(.success(()))
             } catch {
                 completion(.failure(error))

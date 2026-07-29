@@ -64,17 +64,16 @@ final class OratorEngine: @unchecked Sendable {
     /// the provider supplies PCM, this class still owns scheduling and the
     /// generation/lock/scheduledBuffers/synthesisDone/speaking state machine.
     private let kokoro: KokoroProvider
-    /// Optional second engine: KittenTTS via sherpa-onnx. nil until its model is
-    /// present in the models dir - the app runs Kokoro-only until then.
-    private var sherpa: SherpaProvider?
+    /// Downloadable sherpa-onnx models keyed by their catalog archive name.
+    private var loadedModels: [String: SherpaProvider]
     private let providerLock = NSLock()
 
-    /// Resolve the provider that owns `voiceID` by its namespace (`kitten:...`
-    /// routes to sherpa, everything else to Kokoro, the bundled default).
+    /// Resolve a namespaced catalog voice to its installed model. Unknown or
+    /// unavailable voices fall back to Kokoro, the bundled default.
     private func provider(for voiceID: String) -> TTSProvider {
-        if VoiceInfo.providerID(of: voiceID) == "kitten" {
+        if let model = VoiceCatalog.model(forVoiceID: voiceID) {
             providerLock.lock()
-            let provider = sherpa
+            let provider = loadedModels[model.archive]
             providerLock.unlock()
             if let provider { return provider }
         }
@@ -103,10 +102,15 @@ final class OratorEngine: @unchecked Sendable {
 
     var voiceNames: [String] { kokoro.localVoiceNames }
 
-    /// Every voice across all installed providers, namespaced. The picker UI
-    /// can group these by `provider`. Kokoro (bundled) always; Kitten appears
-    /// once its sherpa-onnx model has been downloaded.
-    var availableVoices: [VoiceInfo] { kokoro.voices() + kittenVoices }
+    /// Every voice across all installed providers, namespaced and in catalog
+    /// order after the bundled Kokoro voices.
+    var availableVoices: [VoiceInfo] {
+        providerLock.lock(); defer { providerLock.unlock() }
+        let catalogVoices = VoiceCatalog.models.flatMap { model in
+            loadedModels[model.archive]?.voices() ?? []
+        }
+        return kokoro.voices() + catalogVoices
+    }
 
     /// Kitten (sherpa-onnx) voices only, or empty when that engine isn't loaded.
     /// Their ids are namespaced (`kitten:0`...); Kokoro voices stay bare names in
@@ -114,12 +118,12 @@ final class OratorEngine: @unchecked Sendable {
     /// `voiceNames` (bare Kokoro) with these.
     var kittenVoices: [VoiceInfo] {
         providerLock.lock(); defer { providerLock.unlock() }
-        return sherpa?.voices() ?? []
+        return loadedModels["kitten-mini-en-v0_8"]?.voices() ?? []
     }
 
     var isKittenAvailable: Bool {
         providerLock.lock(); defer { providerLock.unlock() }
-        return sherpa != nil
+        return loadedModels["kitten-mini-en-v0_8"] != nil
     }
 
     /// Whether ANY installed provider can speak `voiceID` (bare Kokoro name or a
@@ -129,12 +133,33 @@ final class OratorEngine: @unchecked Sendable {
         provider(for: voiceID).canSpeak(voiceID: voiceID)
     }
 
-    /// Reload the optional KittenTTS provider after its model is installed.
+    /// Compatibility alias for callers that predate the full voice catalog.
     func reloadKittenProvider() {
-        let provider = Self.loadKittenProvider()
+        reloadCatalog()
+    }
+
+    /// Reload every valid catalog model currently installed on disk.
+    func reloadCatalog() {
+        let providers = Self.loadCatalog()
         providerLock.lock()
-        sherpa = provider
+        loadedModels = providers
         providerLock.unlock()
+    }
+
+    func isInstalled(_ model: CatalogModel) -> Bool {
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(
+            atPath: VoiceCatalog.installDir(for: model).path,
+            isDirectory: &isDirectory
+        )
+        return exists && isDirectory.boolValue
+    }
+
+    var installedVoiceIDs: Set<String> {
+        providerLock.lock(); defer { providerLock.unlock() }
+        return Set(VoiceCatalog.models.flatMap { model in
+            loadedModels[model.archive]?.voices().map(\.id) ?? []
+        })
     }
 
     /// Application Support directory where downloadable engine models live.
@@ -143,43 +168,41 @@ final class OratorEngine: @unchecked Sendable {
         return base.appendingPathComponent("Orator/models", isDirectory: true)
     }
 
-    /// Load the KittenTTS (sherpa-onnx) provider if its model is on disk,
-    /// otherwise nil. Never throws - a missing or broken model simply means the
-    /// app runs Kokoro-only.
-    private static func loadKittenProvider() -> SherpaProvider? {
-        let dir = modelsDirectory.appendingPathComponent("kitten-mini-en-v0_8", isDirectory: true)
-        guard FileManager.default.fileExists(atPath: dir.appendingPathComponent("model.onnx").path) else {
-            oratorLog("kitten: no model at \(dir.path) - running Kokoro-only")
-            return nil
+    /// Load every valid catalog model found on disk. A missing or broken model
+    /// is skipped so the app can continue with its other providers.
+    private static func loadCatalog() -> [String: SherpaProvider] {
+        var providers: [String: SherpaProvider] = [:]
+        for model in VoiceCatalog.models {
+            let dir = VoiceCatalog.installDir(for: model)
+            guard containsModel(at: dir) else { continue }
+            do {
+                let provider = try SherpaProvider(
+                    id: model.engine,
+                    modelDir: dir,
+                    kind: model.kind,
+                    voices: model.voices
+                )
+                providers[model.archive] = provider
+                oratorLog(
+                    "\(model.archive): loaded \(provider.voices().count) voices "
+                        + "via sherpa-onnx (sr \(provider.sampleRate))"
+                )
+            } catch {
+                oratorLog(
+                    "\(model.archive): model present but failed to load - "
+                        + "\(error.localizedDescription)"
+                )
+            }
         }
-        // sid -> name is VERIFIED (F0 fingerprint matched to the KittenTTS
-        // reference voices, plus by-ear confirmation). sherpa preserves the
-        // upstream `available_voices` row order, but KittenTTS's friendly names
-        // are assigned with each adjacent voice pair swapped, so this is NOT
-        // the KittenTTS all_voice_names order. Measured F0 (Hz), for reference:
-        // Jasper 171, Bella 222, Bruno 112 (the one clearly male), Luna 211,
-        // Hugo 175, Rosie 221, Leo 202, Kiki 250.
-        let voices = [
-            SherpaVoice(localID: "0", sid: 0, displayName: "Jasper (F)"),
-            SherpaVoice(localID: "1", sid: 1, displayName: "Bella (F)"),
-            SherpaVoice(localID: "2", sid: 2, displayName: "Bruno (M)"),
-            SherpaVoice(localID: "3", sid: 3, displayName: "Luna (F)"),
-            SherpaVoice(localID: "4", sid: 4, displayName: "Hugo (M)"),
-            SherpaVoice(localID: "5", sid: 5, displayName: "Rosie (F)"),
-            SherpaVoice(localID: "6", sid: 6, displayName: "Leo (F)"),
-            SherpaVoice(localID: "7", sid: 7, displayName: "Kiki (F)"),
-        ]
-        if let provider = try? SherpaProvider(
-            id: "kitten",
-            modelDir: dir,
-            kind: .kitten,
-            voices: voices
-        ) {
-            oratorLog("kitten: loaded \(provider.voices().count) voices via sherpa-onnx (sr \(provider.sampleRate))")
-            return provider
-        }
-        oratorLog("kitten: model present but failed to load")
-        return nil
+        return providers
+    }
+
+    private static func containsModel(at directory: URL) -> Bool {
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else { return false }
+        return contents.contains { $0.pathExtension.lowercased() == "onnx" }
     }
 
     var isSpeaking: Bool {
@@ -258,7 +281,7 @@ final class OratorEngine: @unchecked Sendable {
 
     init(modelPath: URL, voicesPath: URL) throws {
         kokoro = try KokoroProvider(modelPath: modelPath, voicesPath: voicesPath)
-        sherpa = OratorEngine.loadKittenProvider()
+        loadedModels = OratorEngine.loadCatalog()
 
         format = AVAudioFormat(
             standardFormatWithSampleRate: kokoro.sampleRate,
