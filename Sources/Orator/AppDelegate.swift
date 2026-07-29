@@ -56,6 +56,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         static let voice = "voice"
         static let speed = "speed"
         static let autoCast = "autoCast"
+        // Set once Accessibility has ever been granted. If we later launch
+        // untrusted with this flag set, the TCC entry went stale after a
+        // re-signed rebuild - we self-heal it (see healStaleAccessibilityGrant).
+        static let accessibilityGrantedBefore = "accessibilityGrantedBefore"
         static let castGender = "castGender"
         static let continuousReading = "continuousReading"
         static let rememberHistory = "rememberHistory"
@@ -88,7 +92,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         loadEngineAsync()
         registerServices()
 
+        // If a prior grant went stale after a re-signed rebuild, clear the dead
+        // TCC entry BEFORE the trust check so the onboarding prompt can re-add a
+        // fresh one instead of colliding with a toggle the user must remove by
+        // hand. No-op when currently trusted or never granted.
+        healStaleAccessibilityGrantIfNeeded()
+
         if AXIsProcessTrusted() {
+            defaults.set(true, forKey: Pref.accessibilityGrantedBefore)
             installKeyMonitor()
             // Now that Orator is a regular (Dock) app, launching it should show
             // its window like any Mac app - an accessory app never needed to,
@@ -304,6 +315,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ?? HotkeyRecorderWindowController.defaultDisplay(for: action)
     }
 
+    /// Self-heal a stale Accessibility (TCC) grant.
+    ///
+    /// A re-signed rebuild can leave the OLD "Orator" entry in System Settings >
+    /// Privacy & Security > Accessibility switched on but no longer linked to the
+    /// current binary, so `AXIsProcessTrusted()` is false yet the normal prompt
+    /// can't re-add Orator (the dead toggle occupies the slot, and the user has
+    /// to remove it by hand). We can't delete an arbitrary TCC entry, but
+    /// `tccutil reset Accessibility <our-own-bundle-id>` clears OUR entry without
+    /// admin - so we clear it and let the onboarding prompt add a fresh one.
+    ///
+    /// Guarded to run ONLY when not trusted AND granted before, so a valid grant
+    /// is never reset and a genuine first run falls through to the normal flow.
+    private func healStaleAccessibilityGrantIfNeeded() {
+        guard !AXIsProcessTrusted(),
+              defaults.bool(forKey: Pref.accessibilityGrantedBefore),
+              let bundleID = Bundle.main.bundleIdentifier else { return }
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+        task.arguments = ["reset", "Accessibility", bundleID]
+        do {
+            try task.run()
+            task.waitUntilExit()
+            oratorLog("accessibility: cleared stale TCC entry for \(bundleID) (tccutil exit \(task.terminationStatus))")
+        } catch {
+            oratorLog("accessibility: tccutil reset failed - \(error)")
+        }
+    }
+
     private func startTrustPolling() {
         trustPollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             guard AXIsProcessTrusted() else { return }
@@ -311,6 +351,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self = self else { return }
                 self.trustPollTimer?.invalidate()
                 self.trustPollTimer = nil
+                // Remember a real grant so a later stale entry can be told apart
+                // from a genuine first-run (never-granted) state.
+                self.defaults.set(true, forKey: Pref.accessibilityGrantedBefore)
                 self.installKeyMonitor()
                 self.dismissOnboarding()
             }
