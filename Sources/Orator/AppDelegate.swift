@@ -802,6 +802,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(openReader)
             menu.addItem(.separator())
 
+            let voiceRoot = NSMenuItem(title: "Voice", action: nil, keyEquivalent: "")
+            voiceRoot.submenu = makeVoiceMenu()
+            menu.addItem(voiceRoot)
+
             let readFile = NSMenuItem(
                 title: "Read File…",
                 action: #selector(readFile),
@@ -981,6 +985,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quit)
 
         statusItem.menu = menu
+    }
+
+    private func makeVoiceMenu() -> NSMenu {
+        let menu = NSMenu()
+        let voices = availableVoiceNames
+        let groups: [(title: String, prefix: String)] = [
+            ("US · Female", "af"),
+            ("US · Male", "am"),
+            ("UK · Female", "bf"),
+            ("UK · Male", "bm"),
+        ]
+
+        for (groupIndex, group) in groups.enumerated() {
+            let matching = voices.filter { $0.hasPrefix(group.prefix + "_") }
+            guard !matching.isEmpty else { continue }
+            if groupIndex > 0, !menu.items.isEmpty {
+                menu.addItem(.separator())
+            }
+            let header = NSMenuItem(title: group.title, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for voice in matching {
+                let item = NSMenuItem(
+                    title: displayName(for: voice),
+                    action: #selector(selectVoice(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = voice
+                item.state = voice == selectedVoiceName ? .on : .off
+                menu.addItem(item)
+            }
+        }
+
+        let groupedVoices = Set(groups.flatMap { group in
+            voices.filter { $0.hasPrefix(group.prefix + "_") }
+        })
+        let remaining = voices.filter { !groupedVoices.contains($0) }
+        if !remaining.isEmpty {
+            if !menu.items.isEmpty {
+                menu.addItem(.separator())
+            }
+            let header = NSMenuItem(title: "Other", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for voice in remaining {
+                let item = NSMenuItem(
+                    title: displayName(for: voice),
+                    action: #selector(selectVoice(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = voice
+                item.state = voice == selectedVoiceName ? .on : .off
+                menu.addItem(item)
+            }
+        }
+
+        if !kittenVoices.isEmpty {
+            if !menu.items.isEmpty {
+                menu.addItem(.separator())
+            }
+            let header = NSMenuItem(title: "KittenTTS (beta)", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for voice in kittenVoices {
+                let item = NSMenuItem(
+                    title: displayName(for: voice.id),
+                    action: #selector(selectVoice(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = voice.id
+                item.state = voice.id == selectedVoiceName ? .on : .off
+                menu.addItem(item)
+            }
+        }
+
+        return menu
     }
 
     func displayName(for voice: String) -> String {
