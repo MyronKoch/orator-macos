@@ -602,15 +602,21 @@ final class OratorEngine: @unchecked Sendable {
             var offset: TimeInterval = 0
             for (chunkIndex, item) in items.enumerated() {
                 if isCancelled(gen) { return }
-                guard let synthesis = try? provider(for: item.voiceID).synthesize(
+                let chunkProvider = provider(for: item.voiceID)
+                guard let synthesis = try? chunkProvider.synthesize(
                     text: item.text, voiceID: item.voiceID, speed: item.speed ?? defaultSpeed
                 ), !synthesis.samples.isEmpty else { continue }
                 if isCancelled(gen) { return }
-                schedule(samples: synthesis.samples, generation: gen)
+                // Providers may emit at their own rate (Kokoro/Kitten 24 kHz,
+                // Piper 22.05 kHz). schedule() resamples to the engine format so
+                // Piper doesn't play fast/high; timing uses the source rate so
+                // durations stay correct.
+                schedule(samples: synthesis.samples, sampleRate: chunkProvider.sampleRate, generation: gen)
                 offset += emitChunkTiming(
                     synthesis.words, chunkText: item.text, chunkIndex: chunkIndex,
                     chunkCount: items.count, offset: offset,
-                    sampleCount: synthesis.samples.count, generation: gen
+                    sampleCount: synthesis.samples.count, sampleRate: chunkProvider.sampleRate,
+                    generation: gen
                 )
             }
             lock.lock()
@@ -658,12 +664,13 @@ final class OratorEngine: @unchecked Sendable {
         chunkCount: Int,
         offset: TimeInterval,
         sampleCount: Int,
+        sampleRate: Double,
         generation gen: Int
     ) -> TimeInterval {
-        // Playback rate, not the provider's: samples are scheduled at the audio
-        // engine's fixed format (all providers emit at that rate), so the heard
-        // duration is sampleCount / the engine format's rate.
-        let duration = Double(sampleCount) / format.sampleRate
+        // Duration is defined by the SOURCE rate the samples were generated at
+        // (resampling to the engine format preserves real-time duration), so a
+        // 22.05 kHz Piper chunk reports the right length for the Reader.
+        let duration = Double(sampleCount) / sampleRate
         guard let callback = onChunkTiming, !isCancelled(gen) else { return duration }
         let words = words ?? []
         let timing = ChunkTiming(
@@ -674,8 +681,53 @@ final class OratorEngine: @unchecked Sendable {
         return duration
     }
 
-    private func schedule(samples: [Float], generation gen: Int) {
-        guard let buffer = AVAudioPCMBuffer(
+    /// Linear-rate convert mono float samples from `srcRate` to `dstRate`.
+    /// A no-op when the rates already match (Kokoro/Kitten at 24 kHz). Used so a
+    /// 22.05 kHz Piper chunk plays at the correct pitch through the 24 kHz node.
+    private func resample(_ samples: [Float], from srcRate: Double, to dstRate: Double) -> [Float] {
+        guard srcRate != dstRate, !samples.isEmpty,
+              let srcFormat = AVAudioFormat(standardFormatWithSampleRate: srcRate, channels: 1),
+              let dstFormat = AVAudioFormat(standardFormatWithSampleRate: dstRate, channels: 1),
+              let converter = AVAudioConverter(from: srcFormat, to: dstFormat),
+              let srcBuffer = AVAudioPCMBuffer(
+                  pcmFormat: srcFormat, frameCapacity: AVAudioFrameCount(samples.count)
+              )
+        else { return samples }
+
+        srcBuffer.frameLength = AVAudioFrameCount(samples.count)
+        samples.withUnsafeBufferPointer { src in
+            UnsafeMutableRawPointer(srcBuffer.floatChannelData![0]).copyMemory(
+                from: UnsafeRawPointer(src.baseAddress!),
+                byteCount: src.count * MemoryLayout<Float>.stride
+            )
+        }
+
+        let capacity = AVAudioFrameCount(Double(samples.count) * dstRate / srcRate) + 16
+        guard let dstBuffer = AVAudioPCMBuffer(pcmFormat: dstFormat, frameCapacity: capacity) else {
+            return samples
+        }
+        var provided = false
+        let status = converter.convert(to: dstBuffer, error: nil) { _, outStatus in
+            if provided {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            provided = true
+            outStatus.pointee = .haveData
+            return srcBuffer
+        }
+        guard status == .haveData || status == .inputRanDry else { return samples }
+        let count = Int(dstBuffer.frameLength)
+        guard count > 0, let channel = dstBuffer.floatChannelData?[0] else { return samples }
+        return Array(UnsafeBufferPointer(start: channel, count: count))
+    }
+
+    private func schedule(samples rawSamples: [Float], sampleRate: Double, generation gen: Int) {
+        // Resample to the engine's fixed format when the provider's rate differs
+        // (Piper is 22.05 kHz vs the 24 kHz player), else the buffer plays at the
+        // wrong pitch/speed.
+        let samples = resample(rawSamples, from: sampleRate, to: format.sampleRate)
+        guard !samples.isEmpty, let buffer = AVAudioPCMBuffer(
             pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)
         ) else { return }
         buffer.frameLength = buffer.frameCapacity
