@@ -38,6 +38,7 @@ enum OratorError: LocalizedError {
     case voicesNotFound
     case voiceNotFound(String)
     case noTextToExport
+    case providerNotReady(String)
 
     var errorDescription: String? {
         switch self {
@@ -45,6 +46,7 @@ enum OratorError: LocalizedError {
         case .voicesNotFound: return "Voice embeddings not found in app bundle"
         case .voiceNotFound(let name): return "Voice \"\(name)\" not found"
         case .noTextToExport: return "No text to export"
+        case .providerNotReady(let reason): return reason
         }
     }
 }
