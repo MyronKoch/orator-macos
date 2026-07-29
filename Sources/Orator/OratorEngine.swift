@@ -65,17 +65,72 @@ final class OratorEngine: @unchecked Sendable {
     /// generation/lock/scheduledBuffers/synthesisDone/speaking state machine.
     private let kokoro: KokoroProvider
     /// Downloadable sherpa-onnx models keyed by their catalog archive name.
-    private var loadedModels: [String: SherpaProvider]
+    /// Sherpa models are loaded LAZILY (only when a voice is actually spoken)
+    /// and bounded by an LRU cap, so RAM stays ~Kokoro + the active voice no
+    /// matter how many voices are installed. Availability comes from the catalog
+    /// on disk, not from what happens to be loaded.
+    private var loadedModels: [String: SherpaProvider] = [:]
+    private var lruOrder: [String] = []          // archives, most-recently-used last
+    private let maxLoadedModels = 2              // cap resident sherpa models
     private let providerLock = NSLock()
+
+    /// VoiceInfos a catalog model declares, without loading it.
+    private func catalogVoiceInfos(for model: CatalogModel) -> [VoiceInfo] {
+        model.voices.map { voice in
+            VoiceInfo(
+                id: VoiceInfo.namespaced(provider: model.engine, local: voice.localID),
+                displayName: voice.displayName,
+                provider: model.engine,
+                language: "en",
+                supportsWordTimings: false
+            )
+        }
+    }
+
+    /// Return the loaded provider for `model`, loading it on demand (and evicting
+    /// the least-recently-used sherpa model past the cap). Must be called off the
+    /// main thread (it can block on model load). Returns nil if the load fails.
+    private func loadedProvider(for model: CatalogModel) -> SherpaProvider? {
+        providerLock.lock()
+        if let existing = loadedModels[model.archive] {
+            lruOrder.removeAll { $0 == model.archive }
+            lruOrder.append(model.archive)
+            providerLock.unlock()
+            return existing
+        }
+        providerLock.unlock()
+
+        // Load outside the lock (it is slow), then publish under the lock.
+        let dir = VoiceCatalog.installDir(for: model)
+        guard Self.containsModel(at: dir),
+              let provider = try? SherpaProvider(
+                  id: model.engine, modelDir: dir, kind: model.kind, voices: model.voices
+              )
+        else { return nil }
+
+        providerLock.lock()
+        loadedModels[model.archive] = provider
+        lruOrder.removeAll { $0 == model.archive }
+        lruOrder.append(model.archive)
+        while lruOrder.count > maxLoadedModels {
+            let evict = lruOrder.removeFirst()
+            loadedModels[evict] = nil
+        }
+        providerLock.unlock()
+        oratorLog("lazy-loaded \(model.archive) (\(loadedModels.count) sherpa models resident)")
+        return provider
+    }
 
     /// Resolve a namespaced catalog voice to its installed model. Unknown or
     /// unavailable voices fall back to Kokoro, the bundled default.
+    /// Resolve (and lazily load) the provider that owns `voiceID`. Call only on
+    /// a background/synth thread: it may block loading the model. UI validation
+    /// uses `canSpeak(voiceID:)` instead, which never loads.
     private func provider(for voiceID: String) -> TTSProvider {
-        if let model = VoiceCatalog.model(forVoiceID: voiceID) {
-            providerLock.lock()
-            let provider = loadedModels[model.archive]
-            providerLock.unlock()
-            if let provider { return provider }
+        if let model = VoiceCatalog.model(forVoiceID: voiceID),
+           isInstalled(model),
+           let provider = loadedProvider(for: model) {
+            return provider
         }
         return kokoro
     }
@@ -105,10 +160,11 @@ final class OratorEngine: @unchecked Sendable {
     /// Every voice across all installed providers, namespaced and in catalog
     /// order after the bundled Kokoro voices.
     var availableVoices: [VoiceInfo] {
-        providerLock.lock(); defer { providerLock.unlock() }
-        let catalogVoices = VoiceCatalog.models.flatMap { model in
-            loadedModels[model.archive]?.voices() ?? []
-        }
+        // From the catalog on disk, NOT from what's loaded - so an installed but
+        // never-used voice still shows in the picker without costing RAM.
+        let catalogVoices = VoiceCatalog.models
+            .filter { isInstalled($0) }
+            .flatMap { catalogVoiceInfos(for: $0) }
         return kokoro.voices() + catalogVoices
     }
 
@@ -116,21 +172,28 @@ final class OratorEngine: @unchecked Sendable {
     /// Their ids are namespaced (`kitten:0`...); Kokoro voices stay bare names in
     /// the picker for backward-compatible saved prefs, so the UI concatenates
     /// `voiceNames` (bare Kokoro) with these.
+    private var kittenModel: CatalogModel? {
+        VoiceCatalog.models.first { $0.archive == "kitten-mini-en-v0_8" }
+    }
+
     var kittenVoices: [VoiceInfo] {
-        providerLock.lock(); defer { providerLock.unlock() }
-        return loadedModels["kitten-mini-en-v0_8"]?.voices() ?? []
+        guard let kittenModel, isInstalled(kittenModel) else { return [] }
+        return catalogVoiceInfos(for: kittenModel)
     }
 
     var isKittenAvailable: Bool {
-        providerLock.lock(); defer { providerLock.unlock() }
-        return loadedModels["kitten-mini-en-v0_8"] != nil
+        guard let kittenModel else { return false }
+        return isInstalled(kittenModel)
     }
 
     /// Whether ANY installed provider can speak `voiceID` (bare Kokoro name or a
-    /// namespaced id like `kitten:0`). The picker uses this to validate a
-    /// selection across engines.
+    /// namespaced id like `kitten:0`). Catalog/disk-based, so it never triggers a
+    /// model load - safe to call from the UI to validate a selection.
     func canSpeak(voiceID: String) -> Bool {
-        provider(for: voiceID).canSpeak(voiceID: voiceID)
+        if let model = VoiceCatalog.model(forVoiceID: voiceID) {
+            return isInstalled(model)
+        }
+        return kokoro.canSpeak(voiceID: voiceID)
     }
 
     /// Compatibility alias for callers that predate the full voice catalog.
@@ -138,13 +201,11 @@ final class OratorEngine: @unchecked Sendable {
         reloadCatalog()
     }
 
-    /// Reload every valid catalog model currently installed on disk.
-    func reloadCatalog() {
-        let providers = Self.loadCatalog()
-        providerLock.lock()
-        loadedModels = providers
-        providerLock.unlock()
-    }
+    /// No-op now that voice availability is derived from what's installed on
+    /// disk (see `availableVoices`/`canSpeak`) and models load lazily on first
+    /// use. Kept because callers invoke it after a download completes; the newly
+    /// installed voice shows up on the next `availableVoices` read.
+    func reloadCatalog() {}
 
     func isInstalled(_ model: CatalogModel) -> Bool {
         var isDirectory: ObjCBool = false
@@ -170,33 +231,6 @@ final class OratorEngine: @unchecked Sendable {
 
     /// Load every valid catalog model found on disk. A missing or broken model
     /// is skipped so the app can continue with its other providers.
-    private static func loadCatalog() -> [String: SherpaProvider] {
-        var providers: [String: SherpaProvider] = [:]
-        for model in VoiceCatalog.models {
-            let dir = VoiceCatalog.installDir(for: model)
-            guard containsModel(at: dir) else { continue }
-            do {
-                let provider = try SherpaProvider(
-                    id: model.engine,
-                    modelDir: dir,
-                    kind: model.kind,
-                    voices: model.voices
-                )
-                providers[model.archive] = provider
-                oratorLog(
-                    "\(model.archive): loaded \(provider.voices().count) voices "
-                        + "via sherpa-onnx (sr \(provider.sampleRate))"
-                )
-            } catch {
-                oratorLog(
-                    "\(model.archive): model present but failed to load - "
-                        + "\(error.localizedDescription)"
-                )
-            }
-        }
-        return providers
-    }
-
     private static func containsModel(at directory: URL) -> Bool {
         guard let contents = try? FileManager.default.contentsOfDirectory(
             at: directory,
@@ -281,7 +315,7 @@ final class OratorEngine: @unchecked Sendable {
 
     init(modelPath: URL, voicesPath: URL) throws {
         kokoro = try KokoroProvider(modelPath: modelPath, voicesPath: voicesPath)
-        loadedModels = OratorEngine.loadCatalog()
+        // Sherpa models are NOT eager-loaded; they load lazily on first use.
 
         format = AVAudioFormat(
             standardFormatWithSampleRate: kokoro.sampleRate,
@@ -472,7 +506,7 @@ final class OratorEngine: @unchecked Sendable {
             }
             do {
                 guard !chunks.isEmpty else { throw OratorError.noTextToExport }
-                guard provider(for: voiceKey).canSpeak(voiceID: voiceKey) else {
+                guard canSpeak(voiceID: voiceKey) else {
                     throw OratorError.voiceNotFound(voiceKey)
                 }
 
@@ -545,7 +579,7 @@ final class OratorEngine: @unchecked Sendable {
     func speak(chunks: [String]) throws -> Int {
         guard !chunks.isEmpty else { return -1 }
 
-        guard provider(for: currentVoice).canSpeak(voiceID: currentVoice) else {
+        guard canSpeak(voiceID: currentVoice) else {
             oratorLog("speak: lookup failed for \(currentVoice); available: \(Array(voiceNames.prefix(4)))")
             throw OratorError.voiceNotFound(currentVoice)
         }
@@ -560,10 +594,10 @@ final class OratorEngine: @unchecked Sendable {
     /// utterance ID, or -1 if there was nothing to say.
     @discardableResult
     func speak(segments: [SpeechSegment]) throws -> Int {
-        let fallback = provider(for: currentVoice).canSpeak(voiceID: currentVoice) ? currentVoice : nil
+        let fallback = canSpeak(voiceID: currentVoice) ? currentVoice : nil
         var items: [VoicedChunk] = []
         for segment in segments {
-            let resolved = provider(for: segment.voiceName).canSpeak(voiceID: segment.voiceName)
+            let resolved = canSpeak(voiceID: segment.voiceName)
                 ? segment.voiceName
                 : fallback
             guard let voiceID = resolved else { continue }
