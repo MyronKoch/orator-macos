@@ -409,6 +409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Orator window settings bridge
 
     var availableVoiceNames: [String] { engine?.voiceNames ?? [] }
+    var kittenVoices: [VoiceInfo] { engine?.kittenVoices ?? [] }
     var autoCastEnabled: Bool { defaults.bool(forKey: Pref.autoCast) }
     var castGender: String { defaults.string(forKey: Pref.castGender) ?? "auto" }
     func setCastGender(_ rawValue: String) {
@@ -427,7 +428,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var recentReadingEntries: [HistoryEntry] { history.entries }
 
     func setSelectedVoice(_ name: String) {
-        guard let engine, engine.voiceNames.contains(name) else { return }
+        guard let engine, engine.canSpeak(voiceID: name) else { return }
         queuePlaybackActive = false
         engine.stop()
         engine.currentVoice = name
@@ -924,6 +925,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func displayName(for voice: String) -> String {
+        if VoiceInfo.providerID(of: voice) == "kitten" {
+            return engine?.kittenVoices.first { $0.id == voice }?.displayName ?? voice
+        }
         let parts = voice.split(separator: "_")
         guard parts.count == 2 else { return voice }
         let accent = parts[0].hasPrefix("a") ? "US" : "UK"
