@@ -1,12 +1,12 @@
 import Foundation
 import SherpaOnnxC  // C config types (SherpaOnnxOfflineTtsModelConfig) from the xcframework
 
-enum SherpaModelKind {
+enum SherpaModelKind: Sendable {
     case kitten
     case vits
 }
 
-struct SherpaVoice {
+struct SherpaVoice: Sendable {
     let localID: String
     let sid: Int
     let displayName: String
