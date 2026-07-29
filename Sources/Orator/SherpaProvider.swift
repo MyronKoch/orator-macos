@@ -32,10 +32,16 @@ final class SherpaProvider: TTSProvider, @unchecked Sendable {
     }
 
     func voices() -> [VoiceInfo] {
-        // TENTATIVE: The sid-to-name mapping needs by-ear verification.
+        // sid -> name is VERIFIED (F0 fingerprint matched to the KittenTTS
+        // reference voices, plus by-ear confirmation). sherpa preserves the
+        // upstream `available_voices` row order, but KittenTTS's friendly names
+        // are assigned with each adjacent voice pair swapped, so the order below
+        // is NOT the KittenTTS all_voice_names order. Measured F0 (Hz), for
+        // reference: Jasper 171, Bella 222, Bruno 112 (the one clearly male),
+        // Luna 211, Hugo 175, Rosie 221, Leo 202, Kiki 250.
         let displayNames = [
-            "Bella", "Jasper", "Luna", "Bruno",
-            "Rosie", "Hugo", "Kiki", "Leo",
+            "Jasper", "Bella", "Bruno", "Luna",
+            "Hugo", "Rosie", "Leo", "Kiki",
         ]
         return displayNames.enumerated().map { sid, displayName in
             VoiceInfo(
