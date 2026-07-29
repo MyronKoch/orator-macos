@@ -56,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         static let voice = "voice"
         static let speed = "speed"
         static let autoCast = "autoCast"
+        static let kokoroDisabled = "kokoroDisabled"
         // Set once Accessibility has ever been granted. If we later launch
         // untrusted with this flag set, the TCC entry went stale after a
         // re-signed rebuild - we self-heal it (see healStaleAccessibilityGrant).
@@ -211,6 +212,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.engine = engine
                     self.timeline = SpeechTimeline(engine: engine)
                     engine.currentVoice = self.defaults.string(forKey: Pref.voice) ?? "af_heart"
+                    if self.defaults.bool(forKey: Pref.kokoroDisabled),
+                       self.hasNonKokoroVoiceInstalled {
+                        self.setKokoroDisabled(true)
+                    }
                     let savedSpeed = self.defaults.float(forKey: Pref.speed)
                     engine.speed = savedSpeed > 0 ? savedSpeed : 1.0
                     self.continuousReading = self.defaults.object(forKey: Pref.continuousReading) == nil
@@ -453,6 +458,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     var availableVoiceNames: [String] { engine?.voiceNames ?? [] }
     var availableVoices: [VoiceInfo] { engine?.availableVoices ?? [] }
+    var hasNonKokoroVoiceInstalled: Bool {
+        (engine?.availableVoices ?? []).contains {
+            VoiceInfo.providerID(of: $0.id) != nil
+        }
+    }
+    var kokoroDisabled: Bool { defaults.bool(forKey: Pref.kokoroDisabled) }
+    var isKokoroEnabled: Bool { engine?.isKokoroEnabled ?? false }
     var kittenVoices: [VoiceInfo] {
         availableVoices.filter { $0.provider == "kitten" }
     }
@@ -519,6 +531,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engine.currentVoice = name
         defaults.set(name, forKey: Pref.voice)
         rebuildMenu()
+    }
+
+    func setKokoroDisabled(_ disabled: Bool) {
+        if disabled {
+            guard hasNonKokoroVoiceInstalled else { return }
+            if VoiceInfo.providerID(of: selectedVoiceName) == nil,
+               let fallback = engine?.availableVoices.first(where: {
+                   VoiceInfo.providerID(of: $0.id) != nil
+               }) {
+                setSelectedVoice(fallback.id)
+            }
+            engine?.setKokoroEnabled(false)
+        } else {
+            engine?.setKokoroEnabled(true)
+        }
+        defaults.set(disabled, forKey: Pref.kokoroDisabled)
+        rebuildMenu()
+        oratorWindowController?.refresh()
     }
 
     func setSelectedSpeed(_ value: Float) {
