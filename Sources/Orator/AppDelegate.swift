@@ -453,6 +453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     var availableVoiceNames: [String] { engine?.voiceNames ?? [] }
     var kittenVoices: [VoiceInfo] { engine?.kittenVoices ?? [] }
+    var isKittenAvailable: Bool { engine?.isKittenAvailable ?? false }
     var autoCastEnabled: Bool { defaults.bool(forKey: Pref.autoCast) }
     var castGender: String { defaults.string(forKey: Pref.castGender) ?? "auto" }
     func setCastGender(_ rawValue: String) {
@@ -469,6 +470,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var remembersReading: Bool { rememberHistory }
     var continuousReadingEnabled: Bool { continuousReading }
     var recentReadingEntries: [HistoryEntry] { history.entries }
+
+    func downloadKittenVoices(
+        progress: @escaping @MainActor @Sendable (Double) -> Void,
+        completion: @escaping @MainActor @Sendable (Result<Void, Error>) -> Void
+    ) {
+        Task {
+            do {
+                try await KittenDownloader.download(progress: progress)
+                engine?.reloadKittenProvider()
+                completion(.success(()))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+    }
 
     func setSelectedVoice(_ name: String) {
         guard let engine, engine.canSpeak(voiceID: name) else { return }

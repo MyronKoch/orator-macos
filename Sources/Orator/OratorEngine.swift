@@ -66,14 +66,18 @@ final class OratorEngine: @unchecked Sendable {
     private let kokoro: KokoroProvider
     /// Optional second engine: KittenTTS via sherpa-onnx. nil until its model is
     /// present in the models dir - the app runs Kokoro-only until then.
-    private let sherpa: SherpaProvider?
+    private var sherpa: SherpaProvider?
+    private let providerLock = NSLock()
 
     /// Resolve the provider that owns `voiceID` by its namespace (`kitten:...`
-    /// routes to sherpa, everything else to Kokoro, the bundled default). Pure
-    /// and reads only immutable `let`s, so it is safe to call from the synth
-    /// queue with no locking.
+    /// routes to sherpa, everything else to Kokoro, the bundled default).
     private func provider(for voiceID: String) -> TTSProvider {
-        if VoiceInfo.providerID(of: voiceID) == "kitten", let sherpa { return sherpa }
+        if VoiceInfo.providerID(of: voiceID) == "kitten" {
+            providerLock.lock()
+            let provider = sherpa
+            providerLock.unlock()
+            if let provider { return provider }
+        }
         return kokoro
     }
     private let audioEngine = AVAudioEngine()
@@ -102,19 +106,35 @@ final class OratorEngine: @unchecked Sendable {
     /// Every voice across all installed providers, namespaced. The picker UI
     /// can group these by `provider`. Kokoro (bundled) always; Kitten appears
     /// once its sherpa-onnx model has been downloaded.
-    var availableVoices: [VoiceInfo] { kokoro.voices() + (sherpa?.voices() ?? []) }
+    var availableVoices: [VoiceInfo] { kokoro.voices() + kittenVoices }
 
     /// Kitten (sherpa-onnx) voices only, or empty when that engine isn't loaded.
     /// Their ids are namespaced (`kitten:0`...); Kokoro voices stay bare names in
     /// the picker for backward-compatible saved prefs, so the UI concatenates
     /// `voiceNames` (bare Kokoro) with these.
-    var kittenVoices: [VoiceInfo] { sherpa?.voices() ?? [] }
+    var kittenVoices: [VoiceInfo] {
+        providerLock.lock(); defer { providerLock.unlock() }
+        return sherpa?.voices() ?? []
+    }
+
+    var isKittenAvailable: Bool {
+        providerLock.lock(); defer { providerLock.unlock() }
+        return sherpa != nil
+    }
 
     /// Whether ANY installed provider can speak `voiceID` (bare Kokoro name or a
     /// namespaced id like `kitten:0`). The picker uses this to validate a
     /// selection across engines.
     func canSpeak(voiceID: String) -> Bool {
         provider(for: voiceID).canSpeak(voiceID: voiceID)
+    }
+
+    /// Reload the optional KittenTTS provider after its model is installed.
+    func reloadKittenProvider() {
+        let provider = Self.loadKittenProvider()
+        providerLock.lock()
+        sherpa = provider
+        providerLock.unlock()
     }
 
     /// Application Support directory where downloadable engine models live.
