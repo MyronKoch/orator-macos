@@ -40,7 +40,7 @@ final class SherpaProvider: TTSProvider, @unchecked Sendable {
         // Luna 211, Hugo 175, Rosie 221, Leo 202, Kiki 250.
         let displayNames = [
             "Jasper (F)", "Bella (F)", "Bruno (M)", "Luna (F)",
-            "Hugo (F)", "Rosie (F)", "Leo (F)", "Kiki (F)",
+            "Hugo (M)", "Rosie (F)", "Leo (F)", "Kiki (F)",
         ]
         return displayNames.enumerated().map { sid, displayName in
             VoiceInfo(
