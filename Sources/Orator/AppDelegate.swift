@@ -452,7 +452,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Orator window settings bridge
 
     var availableVoiceNames: [String] { engine?.voiceNames ?? [] }
-    var kittenVoices: [VoiceInfo] { engine?.kittenVoices ?? [] }
+    var availableVoices: [VoiceInfo] { engine?.availableVoices ?? [] }
+    var kittenVoices: [VoiceInfo] {
+        availableVoices.filter { $0.provider == "kitten" }
+    }
     var isKittenAvailable: Bool { engine?.isKittenAvailable ?? false }
     var autoCastEnabled: Bool { defaults.bool(forKey: Pref.autoCast) }
     var castGender: String { defaults.string(forKey: Pref.castGender) ?? "auto" }
@@ -499,6 +502,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 completion(.failure(error))
             }
         }
+    }
+
+    func isInstalled(_ model: CatalogModel) -> Bool {
+        engine?.isInstalled(model) ?? false
+    }
+
+    func refreshVoiceMenus() {
+        rebuildMenu()
     }
 
     func setSelectedVoice(_ name: String) {
@@ -1058,14 +1069,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        if !kittenVoices.isEmpty {
+        let catalogSections: [(title: String, provider: String)] = [
+            ("KittenTTS (beta)", "kitten"),
+            ("Piper", "piper"),
+        ]
+        for section in catalogSections {
+            let providerVoices = availableVoices.filter {
+                $0.provider == section.provider
+            }
+            guard !providerVoices.isEmpty else { continue }
             if !menu.items.isEmpty {
                 menu.addItem(.separator())
             }
-            let header = NSMenuItem(title: "KittenTTS (beta)", action: nil, keyEquivalent: "")
+            let header = NSMenuItem(title: section.title, action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
-            for voice in kittenVoices {
+            for voice in providerVoices {
                 let item = NSMenuItem(
                     title: displayName(for: voice.id),
                     action: #selector(selectVoice(_:)),
@@ -1082,8 +1101,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func displayName(for voice: String) -> String {
-        if VoiceInfo.providerID(of: voice) == "kitten" {
-            return engine?.kittenVoices.first { $0.id == voice }?.displayName ?? voice
+        if VoiceInfo.providerID(of: voice) != nil {
+            return engine?.availableVoices.first { $0.id == voice }?.displayName ?? voice
         }
         let parts = voice.split(separator: "_")
         guard parts.count == 2 else { return voice }

@@ -662,17 +662,153 @@ private final class ShortcutsSettingsViewController: NSViewController {
 }
 
 @MainActor
+private final class CatalogModelRowView: NSView {
+    private unowned let appDelegate: AppDelegate
+    private let model: CatalogModel
+    private let onInstalled: @MainActor () -> Void
+    private let installedLabel = NSTextField(labelWithString: "Installed")
+    private let downloadButton = NSButton(title: "Download", target: nil, action: nil)
+    private let progressIndicator = NSProgressIndicator()
+    private let progressLabel = NSTextField(labelWithString: "")
+    private var isDownloadInFlight = false
+
+    init(
+        model: CatalogModel,
+        appDelegate: AppDelegate,
+        onInstalled: @escaping @MainActor () -> Void
+    ) {
+        self.model = model
+        self.appDelegate = appDelegate
+        self.onInstalled = onInstalled
+        super.init(frame: .zero)
+        configure()
+        refreshInstallationStatus()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func refreshInstallationStatus() {
+        guard !isDownloadInFlight else { return }
+        let installed = appDelegate.isInstalled(model)
+        installedLabel.isHidden = !installed
+        downloadButton.isHidden = installed
+        progressIndicator.isHidden = true
+        progressLabel.isHidden = true
+    }
+
+    private func configure() {
+        let names = model.voices.map(\.displayName).joined(separator: ", ")
+        let nameLabel = NSTextField(wrappingLabelWithString: names)
+        nameLabel.font = .systemFont(ofSize: 12)
+        nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let sizeLabel = NSTextField(labelWithString: "~\(model.approxSizeMB) MB")
+        sizeLabel.font = .systemFont(ofSize: 11)
+        sizeLabel.textColor = .secondaryLabelColor
+        sizeLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        installedLabel.font = .systemFont(ofSize: 11)
+        installedLabel.textColor = .tertiaryLabelColor
+        installedLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        downloadButton.target = self
+        downloadButton.action = #selector(downloadModel)
+        downloadButton.bezelStyle = .rounded
+        downloadButton.controlSize = .small
+        downloadButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        progressIndicator.isIndeterminate = false
+        progressIndicator.minValue = 0
+        progressIndicator.maxValue = 100
+        progressIndicator.controlSize = .small
+        progressIndicator.isHidden = true
+        progressIndicator.widthAnchor.constraint(equalToConstant: 72).isActive = true
+
+        progressLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        progressLabel.textColor = .secondaryLabelColor
+        progressLabel.isHidden = true
+        progressLabel.widthAnchor.constraint(equalToConstant: 30).isActive = true
+
+        let controls = NSStackView(
+            views: [installedLabel, downloadButton, progressIndicator, progressLabel]
+        )
+        controls.orientation = .horizontal
+        controls.alignment = .centerY
+        controls.spacing = 5
+        controls.setContentHuggingPriority(.required, for: .horizontal)
+
+        let row = NSStackView(views: [nameLabel, sizeLabel, controls])
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor),
+            row.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+        ])
+    }
+
+    @objc private func downloadModel() {
+        guard !isDownloadInFlight else { return }
+        isDownloadInFlight = true
+        downloadButton.isEnabled = false
+        downloadButton.isHidden = true
+        installedLabel.isHidden = true
+        progressIndicator.doubleValue = 0
+        progressIndicator.isHidden = false
+        progressLabel.stringValue = "0%"
+        progressLabel.isHidden = false
+
+        appDelegate.downloadCatalogModel(
+            model,
+            progress: { [weak self] fraction in
+                guard let self else { return }
+                let percent = Int((fraction * 100).rounded())
+                self.progressIndicator.doubleValue = Double(percent)
+                self.progressLabel.stringValue = "\(percent)%"
+            },
+            completion: { [weak self] result in
+                guard let self else { return }
+                self.isDownloadInFlight = false
+                self.downloadButton.isEnabled = true
+                self.progressIndicator.isHidden = true
+                self.progressLabel.isHidden = true
+
+                switch result {
+                case .success:
+                    self.installedLabel.isHidden = false
+                    self.downloadButton.isHidden = true
+                    self.onInstalled()
+                case .failure(let error):
+                    self.installedLabel.isHidden = true
+                    self.downloadButton.isHidden = false
+                    let alert = NSAlert()
+                    alert.messageText = "Voice download failed"
+                    alert.informativeText = error.localizedDescription
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "OK")
+                    if let window = self.window {
+                        alert.beginSheetModal(for: window)
+                    } else {
+                        alert.runModal()
+                    }
+                }
+            }
+        )
+    }
+}
+
+@MainActor
 private final class VoicesSettingsViewController: NSViewController {
     private unowned let appDelegate: AppDelegate
     private let voicePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let speedPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let kittenDownloadRow = NSStackView()
-    private let kittenDownloadButton = NSButton(
-        title: "Download", target: nil, action: nil
-    )
-    private let kittenDownloadProgress = NSProgressIndicator()
-    private let kittenDownloadPercent = NSTextField(labelWithString: "")
-    private var isKittenDownloadInFlight = false
+    private var catalogRows: [CatalogModelRowView] = []
     private let autoCastCheckbox = NSButton(
         checkboxWithTitle: "Dramatize dialogue", target: nil, action: nil
     )
@@ -789,33 +925,9 @@ private final class VoicesSettingsViewController: NSViewController {
         ])
         globalBox.contentView = boxContent
 
-        let kittenDownloadLabel = NSTextField(
-            labelWithString: "KittenTTS voices (beta) - ~90 MB"
-        )
-        kittenDownloadLabel.font = .systemFont(ofSize: 12)
-        kittenDownloadButton.target = self
-        kittenDownloadButton.action = #selector(downloadKittenVoices)
-        kittenDownloadButton.bezelStyle = .rounded
-        kittenDownloadButton.controlSize = .small
-        kittenDownloadProgress.isIndeterminate = false
-        kittenDownloadProgress.minValue = 0
-        kittenDownloadProgress.maxValue = 100
-        kittenDownloadProgress.controlSize = .small
-        kittenDownloadProgress.isHidden = true
-        kittenDownloadProgress.widthAnchor.constraint(equalToConstant: 110).isActive = true
-        kittenDownloadPercent.font = .monospacedDigitSystemFont(
-            ofSize: 11,
-            weight: .regular
-        )
-        kittenDownloadPercent.textColor = .secondaryLabelColor
-        kittenDownloadPercent.isHidden = true
-        kittenDownloadRow.orientation = .horizontal
-        kittenDownloadRow.alignment = .centerY
-        kittenDownloadRow.spacing = 8
-        kittenDownloadRow.addArrangedSubview(kittenDownloadLabel)
-        kittenDownloadRow.addArrangedSubview(kittenDownloadButton)
-        kittenDownloadRow.addArrangedSubview(kittenDownloadProgress)
-        kittenDownloadRow.addArrangedSubview(kittenDownloadPercent)
+        let libraryHeading = NSTextField(labelWithString: "Voice Library")
+        libraryHeading.font = .systemFont(ofSize: 15, weight: .semibold)
+        let voiceLibrary = makeVoiceLibrary()
 
         stack.addArrangedSubview(heading)
         stack.addArrangedSubview(helper)
@@ -823,7 +935,9 @@ private final class VoicesSettingsViewController: NSViewController {
         stack.addArrangedSubview(autoCastControls)
         autoCastHelp.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         stack.addArrangedSubview(globalBox)
-        stack.addArrangedSubview(kittenDownloadRow)
+        stack.setCustomSpacing(20, after: globalBox)
+        stack.addArrangedSubview(libraryHeading)
+        stack.addArrangedSubview(voiceLibrary)
         let auditionHint = NSTextField(
             wrappingLabelWithString: "Tip: press [ or ] to step through voices and hear each one instantly."
         )
@@ -834,6 +948,7 @@ private final class VoicesSettingsViewController: NSViewController {
         perApp.translatesAutoresizingMaskIntoConstraints = false
         stack.addArrangedSubview(perApp)
         globalBox.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        voiceLibrary.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         perApp.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
         view = makeSettingsScrollView(
@@ -861,6 +976,82 @@ private final class VoicesSettingsViewController: NSViewController {
             return handled ? nil : event
         }
         refresh()
+    }
+
+    private func makeVoiceLibrary() -> NSView {
+        catalogRows.removeAll()
+
+        let libraryStack = NSStackView()
+        libraryStack.translatesAutoresizingMaskIntoConstraints = false
+        libraryStack.orientation = .vertical
+        libraryStack.alignment = .leading
+        libraryStack.spacing = 3
+
+        let sections: [(title: String, engine: String)] = [
+            ("KittenTTS (beta)", "kitten"),
+            ("Piper", "piper"),
+        ]
+        for section in sections {
+            let models = VoiceCatalog.models.filter { $0.engine == section.engine }
+            guard !models.isEmpty else { continue }
+
+            let header = NSTextField(labelWithString: section.title)
+            header.font = .systemFont(ofSize: 12, weight: .semibold)
+            header.textColor = .secondaryLabelColor
+            libraryStack.addArrangedSubview(header)
+            header.widthAnchor.constraint(equalTo: libraryStack.widthAnchor).isActive = true
+            libraryStack.setCustomSpacing(5, after: header)
+
+            for (index, model) in models.enumerated() {
+                let row = CatalogModelRowView(
+                    model: model,
+                    appDelegate: appDelegate,
+                    onInstalled: { [weak self] in
+                        guard let self else { return }
+                        self.refresh()
+                        self.appDelegate.refreshVoiceMenus()
+                    }
+                )
+                catalogRows.append(row)
+                libraryStack.addArrangedSubview(row)
+                row.widthAnchor.constraint(equalTo: libraryStack.widthAnchor).isActive = true
+
+                if index < models.count - 1 {
+                    let separator = NSBox()
+                    separator.boxType = .separator
+                    libraryStack.addArrangedSubview(separator)
+                    separator.widthAnchor.constraint(equalTo: libraryStack.widthAnchor).isActive = true
+                }
+            }
+
+            if section.engine != sections.last?.engine, let lastRow = catalogRows.last {
+                libraryStack.setCustomSpacing(12, after: lastRow)
+            }
+        }
+
+        let documentView = FlippedView()
+        documentView.translatesAutoresizingMaskIntoConstraints = false
+        documentView.addSubview(libraryStack)
+
+        let scrollView = NSScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = documentView
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .bezelBorder
+        scrollView.drawsBackground = false
+        NSLayoutConstraint.activate([
+            scrollView.heightAnchor.constraint(equalToConstant: 320),
+            documentView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            documentView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
+            documentView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            documentView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+            libraryStack.leadingAnchor.constraint(equalTo: documentView.leadingAnchor, constant: 10),
+            libraryStack.trailingAnchor.constraint(equalTo: documentView.trailingAnchor, constant: -10),
+            libraryStack.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 8),
+            documentView.bottomAnchor.constraint(equalTo: libraryStack.bottomAnchor, constant: 8),
+        ])
+        return scrollView
     }
 
     /// [ / ] step through the voice list and auto-preview, but only while the Voices
@@ -902,6 +1093,9 @@ private final class VoicesSettingsViewController: NSViewController {
         guard isViewLoaded else { return }
         rebuildVoiceMenu()
         rebuildSpeedMenu()
+        for row in catalogRows {
+            row.refreshInstallationStatus()
+        }
         syncAutoCastState()
         appDelegate.refreshAppVoiceProfilesEditor()
     }
@@ -929,7 +1123,6 @@ private final class VoicesSettingsViewController: NSViewController {
     }
 
     private func rebuildVoiceMenu() {
-        kittenDownloadRow.isHidden = appDelegate.isKittenAvailable
         voicePopup.removeAllItems()
         let voices = appDelegate.availableVoiceNames
         let groups: [(title: String, prefix: String)] = [
@@ -975,15 +1168,22 @@ private final class VoicesSettingsViewController: NSViewController {
             }
         }
 
-        let kittenVoices = appDelegate.kittenVoices
-        if !kittenVoices.isEmpty {
+        let catalogSections: [(title: String, provider: String)] = [
+            ("KittenTTS (beta)", "kitten"),
+            ("Piper", "piper"),
+        ]
+        for section in catalogSections {
+            let providerVoices = appDelegate.availableVoices.filter {
+                $0.provider == section.provider
+            }
+            guard !providerVoices.isEmpty else { continue }
             if !(voicePopup.menu?.items.isEmpty ?? true) {
                 voicePopup.menu?.addItem(.separator())
             }
-            let header = NSMenuItem(title: "KittenTTS (beta)", action: nil, keyEquivalent: "")
+            let header = NSMenuItem(title: section.title, action: nil, keyEquivalent: "")
             header.isEnabled = false
             voicePopup.menu?.addItem(header)
-            for voice in kittenVoices {
+            for voice in providerVoices {
                 let item = NSMenuItem(
                     title: appDelegate.displayName(for: voice.id),
                     action: nil,
@@ -999,7 +1199,7 @@ private final class VoicesSettingsViewController: NSViewController {
         }) {
             voicePopup.selectItem(at: index)
         }
-        voicePopup.isEnabled = !voices.isEmpty
+        voicePopup.isEnabled = !appDelegate.availableVoices.isEmpty
     }
 
     private func rebuildSpeedMenu() {
@@ -1043,47 +1243,6 @@ private final class VoicesSettingsViewController: NSViewController {
         appDelegate.previewVoice(appDelegate.selectedVoiceName, speed: appDelegate.selectedSpeed)
     }
 
-    @objc private func downloadKittenVoices() {
-        guard !isKittenDownloadInFlight else { return }
-        isKittenDownloadInFlight = true
-        kittenDownloadButton.isEnabled = false
-        kittenDownloadProgress.doubleValue = 0
-        kittenDownloadProgress.isHidden = false
-        kittenDownloadPercent.stringValue = "0%"
-        kittenDownloadPercent.isHidden = false
-
-        appDelegate.downloadKittenVoices(
-            progress: { [weak self] fraction in
-                guard let self else { return }
-                let percent = Int((fraction * 100).rounded())
-                self.kittenDownloadProgress.doubleValue = Double(percent)
-                self.kittenDownloadPercent.stringValue = "\(percent)%"
-            },
-            completion: { [weak self] result in
-                guard let self else { return }
-                self.isKittenDownloadInFlight = false
-                self.kittenDownloadButton.isEnabled = true
-                self.kittenDownloadProgress.isHidden = true
-                self.kittenDownloadPercent.isHidden = true
-
-                switch result {
-                case .success:
-                    self.refresh()
-                case .failure(let error):
-                    let alert = NSAlert()
-                    alert.messageText = "KittenTTS download failed"
-                    alert.informativeText = error.localizedDescription
-                    alert.alertStyle = .warning
-                    alert.addButton(withTitle: "OK")
-                    if let window = self.view.window {
-                        alert.beginSheetModal(for: window)
-                    } else {
-                        alert.runModal()
-                    }
-                }
-            }
-        )
-    }
 }
 
 @MainActor
