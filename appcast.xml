@@ -3,6 +3,18 @@
     <channel>
         <title>Orator</title>
         <item>
+            <title>1.7.0</title>
+            <pubDate>Thu, 30 Jul 2026 10:26:18 -0400</pubDate>
+            <sparkle:version>9</sparkle:version>
+            <sparkle:shortVersionString>1.7.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/MyronKoch/orator-macos/releases/download/v1.7.0/Orator-1.7.0.zip" length="344115633" type="application/octet-stream" sparkle:edSignature="OW7YWe0j4hkTn5t1rvBGgTZZ2GLJjNjeizAgBzg8ng2U7bYfyXYBchOipd4qqthhNr7xZ1FT0yPQD9KUsX4tCg=="/>
+            <sparkle:deltas>
+                <enclosure url="https://github.com/MyronKoch/orator-macos/releases/download/v1.7.0/Orator9-8.delta" sparkle:deltaFrom="8" length="7863258" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="CKXKDkmPYPI20/kF8LYfAHUT380lj4ew2wfOa5pMKxPQJo3S6Ewi/bduaGjSTspObo9AeAHYmTunZFW9YrNwAA=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>1.6.0</title>
             <pubDate>Tue, 28 Jul 2026 15:26:52 -0400</pubDate>
             <sparkle:version>8</sparkle:version>
