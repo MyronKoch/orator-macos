@@ -38,6 +38,7 @@ enum OratorError: LocalizedError {
     case voicesNotFound
     case voiceNotFound(String)
     case noTextToExport
+    case providerNotReady(String)
 
     var errorDescription: String? {
         switch self {
@@ -45,6 +46,7 @@ enum OratorError: LocalizedError {
         case .voicesNotFound: return "Voice embeddings not found in app bundle"
         case .voiceNotFound(let name): return "Voice \"\(name)\" not found"
         case .noTextToExport: return "No text to export"
+        case .providerNotReady(let reason): return reason
         }
     }
 }
@@ -61,8 +63,110 @@ final class OratorEngine: @unchecked Sendable {
     /// The synthesis source. Everything below this line is engine-agnostic:
     /// the provider supplies PCM, this class still owns scheduling and the
     /// generation/lock/scheduledBuffers/synthesisDone/speaking state machine.
-    private let kokoro: KokoroProvider
-    private var provider: TTSProvider { kokoro }
+    /// The bundled default engine. Nullable so it can be UNLOADED to reclaim
+    /// its ~380 MB for users who live entirely in Piper/Kitten. Guarded by
+    /// `providerLock`. The model paths are kept so it can be reloaded.
+    private var kokoro: KokoroProvider?
+    private let kokoroModelPath: URL
+    private let kokoroVoicesPath: URL
+
+    /// Thread-safe read of the optional Kokoro provider.
+    private func kokoroProvider() -> KokoroProvider? {
+        providerLock.lock(); defer { providerLock.unlock() }
+        return kokoro
+    }
+
+    /// Whether Kokoro is currently loaded (the toggle's on-state).
+    var isKokoroEnabled: Bool { kokoroProvider() != nil }
+
+    /// Load or unload Kokoro. Unloading releases the provider and returns MLX's
+    /// cache to the OS (~380 MB). Safe to call from the main thread. Callers
+    /// must ensure the current voice isn't a Kokoro voice before disabling.
+    func setKokoroEnabled(_ enabled: Bool) {
+        if enabled {
+            guard kokoroProvider() == nil,
+                  let loaded = try? KokoroProvider(
+                      modelPath: kokoroModelPath, voicesPath: kokoroVoicesPath
+                  ) else { return }
+            providerLock.lock(); kokoro = loaded; providerLock.unlock()
+            oratorLog("kokoro: enabled (reloaded)")
+        } else {
+            guard kokoroProvider() != nil else { return }
+            providerLock.lock(); kokoro = nil; providerLock.unlock()
+            KokoroProvider.releaseCachedMemory()
+            oratorLog("kokoro: disabled (released ~380 MB)")
+        }
+    }
+    /// Downloadable sherpa-onnx models keyed by their catalog archive name.
+    /// Sherpa models are loaded LAZILY (only when a voice is actually spoken)
+    /// and bounded by an LRU cap, so RAM stays ~Kokoro + the active voice no
+    /// matter how many voices are installed. Availability comes from the catalog
+    /// on disk, not from what happens to be loaded.
+    private var loadedModels: [String: SherpaProvider] = [:]
+    private var lruOrder: [String] = []          // archives, most-recently-used last
+    private let maxLoadedModels = 2              // cap resident sherpa models
+    private let providerLock = NSLock()
+
+    /// VoiceInfos a catalog model declares, without loading it.
+    private func catalogVoiceInfos(for model: CatalogModel) -> [VoiceInfo] {
+        model.voices.map { voice in
+            VoiceInfo(
+                id: VoiceInfo.namespaced(provider: model.engine, local: voice.localID),
+                displayName: voice.displayName,
+                provider: model.engine,
+                language: "en",
+                supportsWordTimings: false
+            )
+        }
+    }
+
+    /// Return the loaded provider for `model`, loading it on demand (and evicting
+    /// the least-recently-used sherpa model past the cap). Must be called off the
+    /// main thread (it can block on model load). Returns nil if the load fails.
+    private func loadedProvider(for model: CatalogModel) -> SherpaProvider? {
+        providerLock.lock()
+        if let existing = loadedModels[model.archive] {
+            lruOrder.removeAll { $0 == model.archive }
+            lruOrder.append(model.archive)
+            providerLock.unlock()
+            return existing
+        }
+        providerLock.unlock()
+
+        // Load outside the lock (it is slow), then publish under the lock.
+        let dir = VoiceCatalog.installDir(for: model)
+        guard Self.containsModel(at: dir),
+              let provider = try? SherpaProvider(
+                  id: model.engine, modelDir: dir, kind: model.kind, voices: model.voices
+              )
+        else { return nil }
+
+        providerLock.lock()
+        loadedModels[model.archive] = provider
+        lruOrder.removeAll { $0 == model.archive }
+        lruOrder.append(model.archive)
+        while lruOrder.count > maxLoadedModels {
+            let evict = lruOrder.removeFirst()
+            loadedModels[evict] = nil
+        }
+        providerLock.unlock()
+        oratorLog("lazy-loaded \(model.archive) (\(loadedModels.count) sherpa models resident)")
+        return provider
+    }
+
+    /// Resolve a namespaced catalog voice to its installed model. Unknown or
+    /// unavailable voices fall back to Kokoro, the bundled default.
+    /// Resolve (and lazily load) the provider that owns `voiceID`. Call only on
+    /// a background/synth thread: it may block loading the model. UI validation
+    /// uses `canSpeak(voiceID:)` instead, which never loads.
+    private func provider(for voiceID: String) -> TTSProvider? {
+        if let model = VoiceCatalog.model(forVoiceID: voiceID),
+           isInstalled(model),
+           let provider = loadedProvider(for: model) {
+            return provider
+        }
+        return kokoroProvider()
+    }
     private let audioEngine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let format: AVAudioFormat
@@ -84,11 +188,89 @@ final class OratorEngine: @unchecked Sendable {
     var currentVoice: String = "af_heart"
     var speed: Float = 1.0
 
-    var voiceNames: [String] { kokoro.localVoiceNames }
+    var voiceNames: [String] { kokoroProvider()?.localVoiceNames ?? [] }
 
-    /// Every voice across all installed providers, namespaced. The picker UI
-    /// can group these by `provider` once a second provider exists.
-    var availableVoices: [VoiceInfo] { provider.voices() }
+    /// Every voice across all installed providers, namespaced and in catalog
+    /// order after the bundled Kokoro voices.
+    var availableVoices: [VoiceInfo] {
+        // From the catalog on disk, NOT from what's loaded - so an installed but
+        // never-used voice still shows in the picker without costing RAM.
+        let catalogVoices = VoiceCatalog.models
+            .filter { isInstalled($0) }
+            .flatMap { catalogVoiceInfos(for: $0) }
+        return (kokoroProvider()?.voices() ?? []) + catalogVoices
+    }
+
+    /// Kitten (sherpa-onnx) voices only, or empty when that engine isn't loaded.
+    /// Their ids are namespaced (`kitten:0`...); Kokoro voices stay bare names in
+    /// the picker for backward-compatible saved prefs, so the UI concatenates
+    /// `voiceNames` (bare Kokoro) with these.
+    private var kittenModel: CatalogModel? {
+        VoiceCatalog.models.first { $0.archive == "kitten-mini-en-v0_8" }
+    }
+
+    var kittenVoices: [VoiceInfo] {
+        guard let kittenModel, isInstalled(kittenModel) else { return [] }
+        return catalogVoiceInfos(for: kittenModel)
+    }
+
+    var isKittenAvailable: Bool {
+        guard let kittenModel else { return false }
+        return isInstalled(kittenModel)
+    }
+
+    /// Whether ANY installed provider can speak `voiceID` (bare Kokoro name or a
+    /// namespaced id like `kitten:0`). Catalog/disk-based, so it never triggers a
+    /// model load - safe to call from the UI to validate a selection.
+    func canSpeak(voiceID: String) -> Bool {
+        if let model = VoiceCatalog.model(forVoiceID: voiceID) {
+            return isInstalled(model)
+        }
+        return kokoroProvider()?.canSpeak(voiceID: voiceID) ?? false
+    }
+
+    /// Compatibility alias for callers that predate the full voice catalog.
+    func reloadKittenProvider() {
+        reloadCatalog()
+    }
+
+    /// No-op now that voice availability is derived from what's installed on
+    /// disk (see `availableVoices`/`canSpeak`) and models load lazily on first
+    /// use. Kept because callers invoke it after a download completes; the newly
+    /// installed voice shows up on the next `availableVoices` read.
+    func reloadCatalog() {}
+
+    func isInstalled(_ model: CatalogModel) -> Bool {
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(
+            atPath: VoiceCatalog.installDir(for: model).path,
+            isDirectory: &isDirectory
+        )
+        return exists && isDirectory.boolValue
+    }
+
+    var installedVoiceIDs: Set<String> {
+        providerLock.lock(); defer { providerLock.unlock() }
+        return Set(VoiceCatalog.models.flatMap { model in
+            loadedModels[model.archive]?.voices().map(\.id) ?? []
+        })
+    }
+
+    /// Application Support directory where downloadable engine models live.
+    static var modelsDirectory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("Orator/models", isDirectory: true)
+    }
+
+    /// Load every valid catalog model found on disk. A missing or broken model
+    /// is skipped so the app can continue with its other providers.
+    private static func containsModel(at directory: URL) -> Bool {
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else { return false }
+        return contents.contains { $0.pathExtension.lowercased() == "onnx" }
+    }
 
     var isSpeaking: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -165,10 +347,14 @@ final class OratorEngine: @unchecked Sendable {
     // MARK: - Init
 
     init(modelPath: URL, voicesPath: URL) throws {
-        kokoro = try KokoroProvider(modelPath: modelPath, voicesPath: voicesPath)
+        kokoroModelPath = modelPath
+        kokoroVoicesPath = voicesPath
+        let loadedKokoro = try KokoroProvider(modelPath: modelPath, voicesPath: voicesPath)
+        kokoro = loadedKokoro
+        // Sherpa models are NOT eager-loaded; they load lazily on first use.
 
         format = AVAudioFormat(
-            standardFormatWithSampleRate: kokoro.sampleRate,
+            standardFormatWithSampleRate: loadedKokoro.sampleRate,
             channels: 1
         )!
         audioEngine.attach(player)
@@ -325,7 +511,7 @@ final class OratorEngine: @unchecked Sendable {
     /// Force one tiny synthesis so the first real utterance has no warmup lag.
     func warmUp() {
         synthQueue.async { [self] in
-            kokoro.warmUp(voiceID: currentVoice)
+            kokoroProvider()?.warmUp(voiceID: currentVoice)
         }
     }
 
@@ -356,13 +542,13 @@ final class OratorEngine: @unchecked Sendable {
             }
             do {
                 guard !chunks.isEmpty else { throw OratorError.noTextToExport }
-                guard provider.canSpeak(voiceID: voiceKey) else {
+                guard let fileProvider = provider(for: voiceKey) else {
                     throw OratorError.voiceNotFound(voiceKey)
                 }
 
                 let settings: [String: Any] = [
                     AVFormatIDKey: kAudioFormatMPEG4AAC,
-                    AVSampleRateKey: provider.sampleRate,
+                    AVSampleRateKey: fileProvider.sampleRate,
                     AVNumberOfChannelsKey: 1,
                     AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
                 ]
@@ -377,7 +563,7 @@ final class OratorEngine: @unchecked Sendable {
 
                     let total = chunks.count
                     for (index, chunk) in chunks.enumerated() {
-                        let samples = try provider.synthesize(
+                        let samples = try fileProvider.synthesize(
                             text: chunk, voiceID: voiceKey, speed: spd
                         ).samples
                         if !samples.isEmpty,
@@ -429,7 +615,7 @@ final class OratorEngine: @unchecked Sendable {
     func speak(chunks: [String]) throws -> Int {
         guard !chunks.isEmpty else { return -1 }
 
-        guard provider.canSpeak(voiceID: currentVoice) else {
+        guard canSpeak(voiceID: currentVoice) else {
             oratorLog("speak: lookup failed for \(currentVoice); available: \(Array(voiceNames.prefix(4)))")
             throw OratorError.voiceNotFound(currentVoice)
         }
@@ -444,10 +630,10 @@ final class OratorEngine: @unchecked Sendable {
     /// utterance ID, or -1 if there was nothing to say.
     @discardableResult
     func speak(segments: [SpeechSegment]) throws -> Int {
-        let fallback = provider.canSpeak(voiceID: currentVoice) ? currentVoice : nil
+        let fallback = canSpeak(voiceID: currentVoice) ? currentVoice : nil
         var items: [VoicedChunk] = []
         for segment in segments {
-            let resolved = provider.canSpeak(voiceID: segment.voiceName)
+            let resolved = canSpeak(voiceID: segment.voiceName)
                 ? segment.voiceName
                 : fallback
             guard let voiceID = resolved else { continue }
@@ -486,15 +672,21 @@ final class OratorEngine: @unchecked Sendable {
             var offset: TimeInterval = 0
             for (chunkIndex, item) in items.enumerated() {
                 if isCancelled(gen) { return }
-                guard let synthesis = try? provider.synthesize(
-                    text: item.text, voiceID: item.voiceID, speed: item.speed ?? defaultSpeed
-                ), !synthesis.samples.isEmpty else { continue }
+                guard let chunkProvider = provider(for: item.voiceID),
+                      let synthesis = try? chunkProvider.synthesize(
+                          text: item.text, voiceID: item.voiceID, speed: item.speed ?? defaultSpeed
+                      ), !synthesis.samples.isEmpty else { continue }
                 if isCancelled(gen) { return }
-                schedule(samples: synthesis.samples, generation: gen)
+                // Providers may emit at their own rate (Kokoro/Kitten 24 kHz,
+                // Piper 22.05 kHz). schedule() resamples to the engine format so
+                // Piper doesn't play fast/high; timing uses the source rate so
+                // durations stay correct.
+                schedule(samples: synthesis.samples, sampleRate: chunkProvider.sampleRate, generation: gen)
                 offset += emitChunkTiming(
                     synthesis.words, chunkText: item.text, chunkIndex: chunkIndex,
                     chunkCount: items.count, offset: offset,
-                    sampleCount: synthesis.samples.count, generation: gen
+                    sampleCount: synthesis.samples.count, sampleRate: chunkProvider.sampleRate,
+                    generation: gen
                 )
             }
             lock.lock()
@@ -542,9 +734,13 @@ final class OratorEngine: @unchecked Sendable {
         chunkCount: Int,
         offset: TimeInterval,
         sampleCount: Int,
+        sampleRate: Double,
         generation gen: Int
     ) -> TimeInterval {
-        let duration = Double(sampleCount) / provider.sampleRate
+        // Duration is defined by the SOURCE rate the samples were generated at
+        // (resampling to the engine format preserves real-time duration), so a
+        // 22.05 kHz Piper chunk reports the right length for the Reader.
+        let duration = Double(sampleCount) / sampleRate
         guard let callback = onChunkTiming, !isCancelled(gen) else { return duration }
         let words = words ?? []
         let timing = ChunkTiming(
@@ -555,8 +751,53 @@ final class OratorEngine: @unchecked Sendable {
         return duration
     }
 
-    private func schedule(samples: [Float], generation gen: Int) {
-        guard let buffer = AVAudioPCMBuffer(
+    /// Linear-rate convert mono float samples from `srcRate` to `dstRate`.
+    /// A no-op when the rates already match (Kokoro/Kitten at 24 kHz). Used so a
+    /// 22.05 kHz Piper chunk plays at the correct pitch through the 24 kHz node.
+    private func resample(_ samples: [Float], from srcRate: Double, to dstRate: Double) -> [Float] {
+        guard srcRate != dstRate, !samples.isEmpty,
+              let srcFormat = AVAudioFormat(standardFormatWithSampleRate: srcRate, channels: 1),
+              let dstFormat = AVAudioFormat(standardFormatWithSampleRate: dstRate, channels: 1),
+              let converter = AVAudioConverter(from: srcFormat, to: dstFormat),
+              let srcBuffer = AVAudioPCMBuffer(
+                  pcmFormat: srcFormat, frameCapacity: AVAudioFrameCount(samples.count)
+              )
+        else { return samples }
+
+        srcBuffer.frameLength = AVAudioFrameCount(samples.count)
+        samples.withUnsafeBufferPointer { src in
+            UnsafeMutableRawPointer(srcBuffer.floatChannelData![0]).copyMemory(
+                from: UnsafeRawPointer(src.baseAddress!),
+                byteCount: src.count * MemoryLayout<Float>.stride
+            )
+        }
+
+        let capacity = AVAudioFrameCount(Double(samples.count) * dstRate / srcRate) + 16
+        guard let dstBuffer = AVAudioPCMBuffer(pcmFormat: dstFormat, frameCapacity: capacity) else {
+            return samples
+        }
+        var provided = false
+        let status = converter.convert(to: dstBuffer, error: nil) { _, outStatus in
+            if provided {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            provided = true
+            outStatus.pointee = .haveData
+            return srcBuffer
+        }
+        guard status == .haveData || status == .inputRanDry else { return samples }
+        let count = Int(dstBuffer.frameLength)
+        guard count > 0, let channel = dstBuffer.floatChannelData?[0] else { return samples }
+        return Array(UnsafeBufferPointer(start: channel, count: count))
+    }
+
+    private func schedule(samples rawSamples: [Float], sampleRate: Double, generation gen: Int) {
+        // Resample to the engine's fixed format when the provider's rate differs
+        // (Piper is 22.05 kHz vs the 24 kHz player), else the buffer plays at the
+        // wrong pitch/speed.
+        let samples = resample(rawSamples, from: sampleRate, to: format.sampleRate)
+        guard !samples.isEmpty, let buffer = AVAudioPCMBuffer(
             pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)
         ) else { return }
         buffer.frameLength = buffer.frameCapacity

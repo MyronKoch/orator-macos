@@ -80,6 +80,14 @@ final class KokoroProvider: TTSProvider, @unchecked Sendable {
         _ = try? tts.generateAudio(voice: voice, language: .enUS, text: "Hi.", speed: 1.0)
     }
 
+    /// Return MLX's cached buffers to the OS. Call AFTER releasing the last
+    /// KokoroProvider so the ~380 MB the model held is actually reclaimed
+    /// (verified: release + clearCache drops RSS ~380 MB). Deallocating the
+    /// provider alone leaves the memory in MLX's pool.
+    static func releaseCachedMemory() {
+        GPU.clearCache()
+    }
+
     // MARK: - Kokoro specifics
 
     /// Resolve a voice name to its embedding, tolerating suffix-spelling
