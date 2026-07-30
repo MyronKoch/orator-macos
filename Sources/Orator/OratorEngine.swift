@@ -249,6 +249,33 @@ final class OratorEngine: @unchecked Sendable {
         return exists && isDirectory.boolValue
     }
 
+    /// Delete an installed sherpa model from disk and evict it from the resident
+    /// cache. Returns true if a directory was removed. Safe on the main thread.
+    /// The caller must first re-home `currentVoice` if it belongs to this model,
+    /// since availability drops the instant the directory is gone.
+    ///
+    /// Order matters: the resident provider (and its LRU slot) is dropped BEFORE
+    /// the files are deleted, so the ONNX session and its file handles are
+    /// released first. No MLX is involved here (that is Kokoro only), so there is
+    /// nothing to `clearCache`; freeing the provider returns its RAM directly.
+    func uninstall(_ model: CatalogModel) -> Bool {
+        providerLock.lock()
+        loadedModels[model.archive] = nil
+        lruOrder.removeAll { $0 == model.archive }
+        providerLock.unlock()
+
+        let dir = VoiceCatalog.installDir(for: model)
+        guard FileManager.default.fileExists(atPath: dir.path) else { return false }
+        do {
+            try FileManager.default.removeItem(at: dir)
+            oratorLog("uninstalled \(model.archive)")
+            return true
+        } catch {
+            oratorLog("uninstall \(model.archive) failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     var installedVoiceIDs: Set<String> {
         providerLock.lock(); defer { providerLock.unlock() }
         return Set(VoiceCatalog.models.flatMap { model in
