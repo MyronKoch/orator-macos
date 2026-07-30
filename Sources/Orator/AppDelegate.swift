@@ -56,6 +56,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         static let voice = "voice"
         static let speed = "speed"
         static let autoCast = "autoCast"
+        static let kokoroDisabled = "kokoroDisabled"
+        // Set once Accessibility has ever been granted. If we later launch
+        // untrusted with this flag set, the TCC entry went stale after a
+        // re-signed rebuild - we self-heal it (see healStaleAccessibilityGrant).
+        static let accessibilityGrantedBefore = "accessibilityGrantedBefore"
         static let castGender = "castGender"
         static let continuousReading = "continuousReading"
         static let rememberHistory = "rememberHistory"
@@ -88,7 +93,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         loadEngineAsync()
         registerServices()
 
+        // If a prior grant went stale after a re-signed rebuild, clear the dead
+        // TCC entry BEFORE the trust check so the onboarding prompt can re-add a
+        // fresh one instead of colliding with a toggle the user must remove by
+        // hand. No-op when currently trusted or never granted.
+        healStaleAccessibilityGrantIfNeeded()
+
         if AXIsProcessTrusted() {
+            defaults.set(true, forKey: Pref.accessibilityGrantedBefore)
             installKeyMonitor()
             // Now that Orator is a regular (Dock) app, launching it should show
             // its window like any Mac app - an accessory app never needed to,
@@ -200,6 +212,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.engine = engine
                     self.timeline = SpeechTimeline(engine: engine)
                     engine.currentVoice = self.defaults.string(forKey: Pref.voice) ?? "af_heart"
+                    if self.defaults.bool(forKey: Pref.kokoroDisabled),
+                       self.hasNonKokoroVoiceInstalled {
+                        self.setKokoroDisabled(true)
+                    }
                     let savedSpeed = self.defaults.float(forKey: Pref.speed)
                     engine.speed = savedSpeed > 0 ? savedSpeed : 1.0
                     self.continuousReading = self.defaults.object(forKey: Pref.continuousReading) == nil
@@ -304,6 +320,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ?? HotkeyRecorderWindowController.defaultDisplay(for: action)
     }
 
+    /// Self-heal a stale Accessibility (TCC) grant.
+    ///
+    /// A re-signed rebuild can leave the OLD "Orator" entry in System Settings >
+    /// Privacy & Security > Accessibility switched on but no longer linked to the
+    /// current binary, so `AXIsProcessTrusted()` is false yet the normal prompt
+    /// can't re-add Orator (the dead toggle occupies the slot, and the user has
+    /// to remove it by hand). We can't delete an arbitrary TCC entry, but
+    /// `tccutil reset Accessibility <our-own-bundle-id>` clears OUR entry without
+    /// admin - so we clear it and let the onboarding prompt add a fresh one.
+    ///
+    /// Guarded to run ONLY when not trusted AND granted before, so a valid grant
+    /// is never reset and a genuine first run falls through to the normal flow.
+    private func healStaleAccessibilityGrantIfNeeded() {
+        guard !AXIsProcessTrusted(),
+              defaults.bool(forKey: Pref.accessibilityGrantedBefore),
+              let bundleID = Bundle.main.bundleIdentifier else { return }
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+        task.arguments = ["reset", "Accessibility", bundleID]
+        do {
+            try task.run()
+            task.waitUntilExit()
+            oratorLog("accessibility: cleared stale TCC entry for \(bundleID) (tccutil exit \(task.terminationStatus))")
+        } catch {
+            oratorLog("accessibility: tccutil reset failed - \(error)")
+        }
+    }
+
     private func startTrustPolling() {
         trustPollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             guard AXIsProcessTrusted() else { return }
@@ -311,6 +356,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self = self else { return }
                 self.trustPollTimer?.invalidate()
                 self.trustPollTimer = nil
+                // Remember a real grant so a later stale entry can be told apart
+                // from a genuine first-run (never-granted) state.
+                self.defaults.set(true, forKey: Pref.accessibilityGrantedBefore)
                 self.installKeyMonitor()
                 self.dismissOnboarding()
             }
@@ -409,6 +457,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Orator window settings bridge
 
     var availableVoiceNames: [String] { engine?.voiceNames ?? [] }
+    var availableVoices: [VoiceInfo] { engine?.availableVoices ?? [] }
+    var hasNonKokoroVoiceInstalled: Bool {
+        (engine?.availableVoices ?? []).contains {
+            VoiceInfo.providerID(of: $0.id) != nil
+        }
+    }
+    var kokoroDisabled: Bool { defaults.bool(forKey: Pref.kokoroDisabled) }
+    var isKokoroEnabled: Bool { engine?.isKokoroEnabled ?? false }
+    var kittenVoices: [VoiceInfo] {
+        availableVoices.filter { $0.provider == "kitten" }
+    }
+    var isKittenAvailable: Bool { engine?.isKittenAvailable ?? false }
     var autoCastEnabled: Bool { defaults.bool(forKey: Pref.autoCast) }
     var castGender: String { defaults.string(forKey: Pref.castGender) ?? "auto" }
     func setCastGender(_ rawValue: String) {
@@ -426,13 +486,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var continuousReadingEnabled: Bool { continuousReading }
     var recentReadingEntries: [HistoryEntry] { history.entries }
 
+    func downloadKittenVoices(
+        progress: @escaping @MainActor @Sendable (Double) -> Void,
+        completion: @escaping @MainActor @Sendable (Result<Void, Error>) -> Void
+    ) {
+        let kitten = VoiceCatalog.models.first {
+            $0.archive == "kitten-mini-en-v0_8"
+        }!
+        downloadCatalogModel(
+            kitten,
+            progress: progress,
+            completion: completion
+        )
+    }
+
+    func downloadCatalogModel(
+        _ model: CatalogModel,
+        progress: @escaping @MainActor @Sendable (Double) -> Void,
+        completion: @escaping @MainActor @Sendable (Result<Void, Error>) -> Void
+    ) {
+        Task {
+            do {
+                try await KittenDownloader.download(model, progress: progress)
+                engine?.reloadCatalog()
+                completion(.success(()))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+    }
+
+    func isInstalled(_ model: CatalogModel) -> Bool {
+        engine?.isInstalled(model) ?? false
+    }
+
+    func refreshVoiceMenus() {
+        rebuildMenu()
+    }
+
     func setSelectedVoice(_ name: String) {
-        guard let engine, engine.voiceNames.contains(name) else { return }
+        guard let engine, engine.canSpeak(voiceID: name) else { return }
         queuePlaybackActive = false
         engine.stop()
         engine.currentVoice = name
         defaults.set(name, forKey: Pref.voice)
         rebuildMenu()
+    }
+
+    func setKokoroDisabled(_ disabled: Bool) {
+        if disabled {
+            guard hasNonKokoroVoiceInstalled else { return }
+            if VoiceInfo.providerID(of: selectedVoiceName) == nil,
+               let fallback = engine?.availableVoices.first(where: {
+                   VoiceInfo.providerID(of: $0.id) != nil
+               }) {
+                setSelectedVoice(fallback.id)
+            }
+            engine?.setKokoroEnabled(false)
+        } else {
+            engine?.setKokoroEnabled(true)
+        }
+        defaults.set(disabled, forKey: Pref.kokoroDisabled)
+        rebuildMenu()
+        oratorWindowController?.refresh()
     }
 
     func setSelectedSpeed(_ value: Float) {
@@ -742,6 +858,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(openReader)
             menu.addItem(.separator())
 
+            let voiceRoot = NSMenuItem(title: "Voice", action: nil, keyEquivalent: "")
+            voiceRoot.submenu = makeVoiceMenu()
+            menu.addItem(voiceRoot)
+
             let readFile = NSMenuItem(
                 title: "Read File…",
                 action: #selector(readFile),
@@ -923,7 +1043,97 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
+    private func makeVoiceMenu() -> NSMenu {
+        let menu = NSMenu()
+        let voices = availableVoiceNames
+        let groups: [(title: String, prefix: String)] = [
+            ("US · Female", "af"),
+            ("US · Male", "am"),
+            ("UK · Female", "bf"),
+            ("UK · Male", "bm"),
+        ]
+
+        for (groupIndex, group) in groups.enumerated() {
+            let matching = voices.filter { $0.hasPrefix(group.prefix + "_") }
+            guard !matching.isEmpty else { continue }
+            if groupIndex > 0, !menu.items.isEmpty {
+                menu.addItem(.separator())
+            }
+            let header = NSMenuItem(title: group.title, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for voice in matching {
+                let item = NSMenuItem(
+                    title: displayName(for: voice),
+                    action: #selector(selectVoice(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = voice
+                item.state = voice == selectedVoiceName ? .on : .off
+                menu.addItem(item)
+            }
+        }
+
+        let groupedVoices = Set(groups.flatMap { group in
+            voices.filter { $0.hasPrefix(group.prefix + "_") }
+        })
+        let remaining = voices.filter { !groupedVoices.contains($0) }
+        if !remaining.isEmpty {
+            if !menu.items.isEmpty {
+                menu.addItem(.separator())
+            }
+            let header = NSMenuItem(title: "Other", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for voice in remaining {
+                let item = NSMenuItem(
+                    title: displayName(for: voice),
+                    action: #selector(selectVoice(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = voice
+                item.state = voice == selectedVoiceName ? .on : .off
+                menu.addItem(item)
+            }
+        }
+
+        let catalogSections: [(title: String, provider: String)] = [
+            ("KittenTTS (beta)", "kitten"),
+            ("Piper", "piper"),
+        ]
+        for section in catalogSections {
+            let providerVoices = availableVoices.filter {
+                $0.provider == section.provider
+            }
+            guard !providerVoices.isEmpty else { continue }
+            if !menu.items.isEmpty {
+                menu.addItem(.separator())
+            }
+            let header = NSMenuItem(title: section.title, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for voice in providerVoices {
+                let item = NSMenuItem(
+                    title: displayName(for: voice.id),
+                    action: #selector(selectVoice(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = voice.id
+                item.state = voice.id == selectedVoiceName ? .on : .off
+                menu.addItem(item)
+            }
+        }
+
+        return menu
+    }
+
     func displayName(for voice: String) -> String {
+        if VoiceInfo.providerID(of: voice) != nil {
+            return engine?.availableVoices.first { $0.id == voice }?.displayName ?? voice
+        }
         let parts = voice.split(separator: "_")
         guard parts.count == 2 else { return voice }
         let accent = parts[0].hasPrefix("a") ? "US" : "UK"

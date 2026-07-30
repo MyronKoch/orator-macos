@@ -662,10 +662,153 @@ private final class ShortcutsSettingsViewController: NSViewController {
 }
 
 @MainActor
+private final class CatalogModelRowView: NSView {
+    private unowned let appDelegate: AppDelegate
+    private let model: CatalogModel
+    private let onInstalled: @MainActor () -> Void
+    private let installedLabel = NSTextField(labelWithString: "Installed")
+    private let downloadButton = NSButton(title: "Download", target: nil, action: nil)
+    private let progressIndicator = NSProgressIndicator()
+    private let progressLabel = NSTextField(labelWithString: "")
+    private var isDownloadInFlight = false
+
+    init(
+        model: CatalogModel,
+        appDelegate: AppDelegate,
+        onInstalled: @escaping @MainActor () -> Void
+    ) {
+        self.model = model
+        self.appDelegate = appDelegate
+        self.onInstalled = onInstalled
+        super.init(frame: .zero)
+        configure()
+        refreshInstallationStatus()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func refreshInstallationStatus() {
+        guard !isDownloadInFlight else { return }
+        let installed = appDelegate.isInstalled(model)
+        installedLabel.isHidden = !installed
+        downloadButton.isHidden = installed
+        progressIndicator.isHidden = true
+        progressLabel.isHidden = true
+    }
+
+    private func configure() {
+        let names = model.voices.map(\.displayName).joined(separator: ", ")
+        let nameLabel = NSTextField(wrappingLabelWithString: names)
+        nameLabel.font = .systemFont(ofSize: 12)
+        nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let sizeLabel = NSTextField(labelWithString: "~\(model.approxSizeMB) MB")
+        sizeLabel.font = .systemFont(ofSize: 11)
+        sizeLabel.textColor = .secondaryLabelColor
+        sizeLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        installedLabel.font = .systemFont(ofSize: 11)
+        installedLabel.textColor = .tertiaryLabelColor
+        installedLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        downloadButton.target = self
+        downloadButton.action = #selector(downloadModel)
+        downloadButton.bezelStyle = .rounded
+        downloadButton.controlSize = .small
+        downloadButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        progressIndicator.isIndeterminate = false
+        progressIndicator.minValue = 0
+        progressIndicator.maxValue = 100
+        progressIndicator.controlSize = .small
+        progressIndicator.isHidden = true
+        progressIndicator.widthAnchor.constraint(equalToConstant: 72).isActive = true
+
+        progressLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        progressLabel.textColor = .secondaryLabelColor
+        progressLabel.isHidden = true
+        progressLabel.widthAnchor.constraint(equalToConstant: 30).isActive = true
+
+        let controls = NSStackView(
+            views: [installedLabel, downloadButton, progressIndicator, progressLabel]
+        )
+        controls.orientation = .horizontal
+        controls.alignment = .centerY
+        controls.spacing = 5
+        controls.setContentHuggingPriority(.required, for: .horizontal)
+
+        let row = NSStackView(views: [nameLabel, sizeLabel, controls])
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor),
+            row.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+        ])
+    }
+
+    @objc private func downloadModel() {
+        guard !isDownloadInFlight else { return }
+        isDownloadInFlight = true
+        downloadButton.isEnabled = false
+        downloadButton.isHidden = true
+        installedLabel.isHidden = true
+        progressIndicator.doubleValue = 0
+        progressIndicator.isHidden = false
+        progressLabel.stringValue = "0%"
+        progressLabel.isHidden = false
+
+        appDelegate.downloadCatalogModel(
+            model,
+            progress: { [weak self] fraction in
+                guard let self else { return }
+                let percent = Int((fraction * 100).rounded())
+                self.progressIndicator.doubleValue = Double(percent)
+                self.progressLabel.stringValue = "\(percent)%"
+            },
+            completion: { [weak self] result in
+                guard let self else { return }
+                self.isDownloadInFlight = false
+                self.downloadButton.isEnabled = true
+                self.progressIndicator.isHidden = true
+                self.progressLabel.isHidden = true
+
+                switch result {
+                case .success:
+                    self.installedLabel.isHidden = false
+                    self.downloadButton.isHidden = true
+                    self.onInstalled()
+                case .failure(let error):
+                    self.installedLabel.isHidden = true
+                    self.downloadButton.isHidden = false
+                    let alert = NSAlert()
+                    alert.messageText = "Voice download failed"
+                    alert.informativeText = error.localizedDescription
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "OK")
+                    if let window = self.window {
+                        alert.beginSheetModal(for: window)
+                    } else {
+                        alert.runModal()
+                    }
+                }
+            }
+        )
+    }
+}
+
+@MainActor
 private final class VoicesSettingsViewController: NSViewController {
     private unowned let appDelegate: AppDelegate
     private let voicePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let speedPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private var catalogRows: [CatalogModelRowView] = []
     private let autoCastCheckbox = NSButton(
         checkboxWithTitle: "Dramatize dialogue", target: nil, action: nil
     )
@@ -782,12 +925,19 @@ private final class VoicesSettingsViewController: NSViewController {
         ])
         globalBox.contentView = boxContent
 
+        let libraryHeading = NSTextField(labelWithString: "Voice Library")
+        libraryHeading.font = .systemFont(ofSize: 15, weight: .semibold)
+        let voiceLibrary = makeVoiceLibrary()
+
         stack.addArrangedSubview(heading)
         stack.addArrangedSubview(helper)
         stack.setCustomSpacing(20, after: helper)
         stack.addArrangedSubview(autoCastControls)
         autoCastHelp.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         stack.addArrangedSubview(globalBox)
+        stack.setCustomSpacing(20, after: globalBox)
+        stack.addArrangedSubview(libraryHeading)
+        stack.addArrangedSubview(voiceLibrary)
         let auditionHint = NSTextField(
             wrappingLabelWithString: "Tip: press [ or ] to step through voices and hear each one instantly."
         )
@@ -798,6 +948,7 @@ private final class VoicesSettingsViewController: NSViewController {
         perApp.translatesAutoresizingMaskIntoConstraints = false
         stack.addArrangedSubview(perApp)
         globalBox.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        voiceLibrary.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         perApp.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
         view = makeSettingsScrollView(
@@ -825,6 +976,82 @@ private final class VoicesSettingsViewController: NSViewController {
             return handled ? nil : event
         }
         refresh()
+    }
+
+    private func makeVoiceLibrary() -> NSView {
+        catalogRows.removeAll()
+
+        let libraryStack = NSStackView()
+        libraryStack.translatesAutoresizingMaskIntoConstraints = false
+        libraryStack.orientation = .vertical
+        libraryStack.alignment = .leading
+        libraryStack.spacing = 3
+
+        let sections: [(title: String, engine: String)] = [
+            ("KittenTTS (beta)", "kitten"),
+            ("Piper", "piper"),
+        ]
+        for section in sections {
+            let models = VoiceCatalog.models.filter { $0.engine == section.engine }
+            guard !models.isEmpty else { continue }
+
+            let header = NSTextField(labelWithString: section.title)
+            header.font = .systemFont(ofSize: 12, weight: .semibold)
+            header.textColor = .secondaryLabelColor
+            libraryStack.addArrangedSubview(header)
+            header.widthAnchor.constraint(equalTo: libraryStack.widthAnchor).isActive = true
+            libraryStack.setCustomSpacing(5, after: header)
+
+            for (index, model) in models.enumerated() {
+                let row = CatalogModelRowView(
+                    model: model,
+                    appDelegate: appDelegate,
+                    onInstalled: { [weak self] in
+                        guard let self else { return }
+                        self.refresh()
+                        self.appDelegate.refreshVoiceMenus()
+                    }
+                )
+                catalogRows.append(row)
+                libraryStack.addArrangedSubview(row)
+                row.widthAnchor.constraint(equalTo: libraryStack.widthAnchor).isActive = true
+
+                if index < models.count - 1 {
+                    let separator = NSBox()
+                    separator.boxType = .separator
+                    libraryStack.addArrangedSubview(separator)
+                    separator.widthAnchor.constraint(equalTo: libraryStack.widthAnchor).isActive = true
+                }
+            }
+
+            if section.engine != sections.last?.engine, let lastRow = catalogRows.last {
+                libraryStack.setCustomSpacing(12, after: lastRow)
+            }
+        }
+
+        let documentView = FlippedView()
+        documentView.translatesAutoresizingMaskIntoConstraints = false
+        documentView.addSubview(libraryStack)
+
+        let scrollView = NSScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = documentView
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .bezelBorder
+        scrollView.drawsBackground = false
+        NSLayoutConstraint.activate([
+            scrollView.heightAnchor.constraint(equalToConstant: 320),
+            documentView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            documentView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
+            documentView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            documentView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+            libraryStack.leadingAnchor.constraint(equalTo: documentView.leadingAnchor, constant: 10),
+            libraryStack.trailingAnchor.constraint(equalTo: documentView.trailingAnchor, constant: -10),
+            libraryStack.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 8),
+            documentView.bottomAnchor.constraint(equalTo: libraryStack.bottomAnchor, constant: 8),
+        ])
+        return scrollView
     }
 
     /// [ / ] step through the voice list and auto-preview, but only while the Voices
@@ -866,6 +1093,9 @@ private final class VoicesSettingsViewController: NSViewController {
         guard isViewLoaded else { return }
         rebuildVoiceMenu()
         rebuildSpeedMenu()
+        for row in catalogRows {
+            row.refreshInstallationStatus()
+        }
         syncAutoCastState()
         appDelegate.refreshAppVoiceProfilesEditor()
     }
@@ -938,12 +1168,38 @@ private final class VoicesSettingsViewController: NSViewController {
             }
         }
 
+        let catalogSections: [(title: String, provider: String)] = [
+            ("KittenTTS (beta)", "kitten"),
+            ("Piper", "piper"),
+        ]
+        for section in catalogSections {
+            let providerVoices = appDelegate.availableVoices.filter {
+                $0.provider == section.provider
+            }
+            guard !providerVoices.isEmpty else { continue }
+            if !(voicePopup.menu?.items.isEmpty ?? true) {
+                voicePopup.menu?.addItem(.separator())
+            }
+            let header = NSMenuItem(title: section.title, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            voicePopup.menu?.addItem(header)
+            for voice in providerVoices {
+                let item = NSMenuItem(
+                    title: appDelegate.displayName(for: voice.id),
+                    action: nil,
+                    keyEquivalent: ""
+                )
+                item.representedObject = voice.id
+                voicePopup.menu?.addItem(item)
+            }
+        }
+
         if let index = voicePopup.menu?.items.firstIndex(where: {
             ($0.representedObject as? String) == appDelegate.selectedVoiceName
         }) {
             voicePopup.selectItem(at: index)
         }
-        voicePopup.isEnabled = !voices.isEmpty
+        voicePopup.isEnabled = !appDelegate.availableVoices.isEmpty
     }
 
     private func rebuildSpeedMenu() {
@@ -986,6 +1242,7 @@ private final class VoicesSettingsViewController: NSViewController {
     @objc private func previewVoice() {
         appDelegate.previewVoice(appDelegate.selectedVoiceName, speed: appDelegate.selectedSpeed)
     }
+
 }
 
 @MainActor
@@ -997,6 +1254,9 @@ private final class GeneralSettingsViewController: NSViewController {
     )
     private let continuousCheckbox = NSButton(
         checkboxWithTitle: "Continuous reading", target: nil, action: nil
+    )
+    private let kokoroCheckbox = NSButton(
+        checkboxWithTitle: "Disable Kokoro (frees ~380 MB RAM)", target: nil, action: nil
     )
     private let historyStack = NSStackView()
     private var historyTexts: [String] = []
@@ -1027,9 +1287,12 @@ private final class GeneralSettingsViewController: NSViewController {
         rememberCheckbox.action = #selector(toggleRememberReading(_:))
         continuousCheckbox.target = self
         continuousCheckbox.action = #selector(toggleContinuousReading(_:))
+        kokoroCheckbox.target = self
+        kokoroCheckbox.action = #selector(toggleKokoro(_:))
         content.addArrangedSubview(loginCheckbox)
         content.addArrangedSubview(rememberCheckbox)
         content.addArrangedSubview(continuousCheckbox)
+        content.addArrangedSubview(kokoroCheckbox)
 
         let rememberHelp = NSTextField(
             wrappingLabelWithString: "Reading history and Dashboard stats are stored locally only when “Remember my reading” is on."
@@ -1096,6 +1359,13 @@ private final class GeneralSettingsViewController: NSViewController {
         loginCheckbox.state = appDelegate.startAtLoginEnabled ? .on : .off
         rememberCheckbox.state = appDelegate.remembersReading ? .on : .off
         continuousCheckbox.state = appDelegate.continuousReadingEnabled ? .on : .off
+        kokoroCheckbox.state = appDelegate.kokoroDisabled ? .on : .off
+        let needsAlternativeVoice = !appDelegate.hasNonKokoroVoiceInstalled
+            && appDelegate.isKokoroEnabled
+        kokoroCheckbox.isEnabled = !needsAlternativeVoice
+        kokoroCheckbox.toolTip = needsAlternativeVoice
+            ? "Download a Piper or Kitten voice first"
+            : nil
         rebuildHistory()
     }
 
@@ -1142,6 +1412,11 @@ private final class GeneralSettingsViewController: NSViewController {
     @objc private func toggleContinuousReading(_ sender: NSButton) {
         appDelegate.setContinuousReading(sender.state == .on)
         refresh()
+    }
+
+    @objc private func toggleKokoro(_ sender: NSButton) {
+        appDelegate.setKokoroDisabled(sender.state == .on)
+        sender.state = appDelegate.kokoroDisabled ? .on : .off
     }
 
     @objc private func clearReadingHistory() {
