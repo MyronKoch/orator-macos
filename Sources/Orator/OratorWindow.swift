@@ -667,6 +667,7 @@ private final class CatalogModelRowView: NSView {
     private let model: CatalogModel
     private let onInstalled: @MainActor () -> Void
     private let installedLabel = NSTextField(labelWithString: "Installed")
+    private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
     private let downloadButton = NSButton(title: "Download", target: nil, action: nil)
     private let progressIndicator = NSProgressIndicator()
     private let progressLabel = NSTextField(labelWithString: "")
@@ -693,6 +694,7 @@ private final class CatalogModelRowView: NSView {
         guard !isDownloadInFlight else { return }
         let installed = appDelegate.isInstalled(model)
         installedLabel.isHidden = !installed
+        removeButton.isHidden = !installed
         downloadButton.isHidden = installed
         progressIndicator.isHidden = true
         progressLabel.isHidden = true
@@ -719,6 +721,13 @@ private final class CatalogModelRowView: NSView {
         downloadButton.controlSize = .small
         downloadButton.setContentHuggingPriority(.required, for: .horizontal)
 
+        removeButton.target = self
+        removeButton.action = #selector(removeModel)
+        removeButton.bezelStyle = .rounded
+        removeButton.controlSize = .small
+        removeButton.isHidden = true
+        removeButton.setContentHuggingPriority(.required, for: .horizontal)
+
         progressIndicator.isIndeterminate = false
         progressIndicator.minValue = 0
         progressIndicator.maxValue = 100
@@ -732,7 +741,7 @@ private final class CatalogModelRowView: NSView {
         progressLabel.widthAnchor.constraint(equalToConstant: 30).isActive = true
 
         let controls = NSStackView(
-            views: [installedLabel, downloadButton, progressIndicator, progressLabel]
+            views: [installedLabel, removeButton, downloadButton, progressIndicator, progressLabel]
         )
         controls.orientation = .horizontal
         controls.alignment = .centerY
@@ -800,6 +809,21 @@ private final class CatalogModelRowView: NSView {
                 }
             }
         )
+    }
+
+    @objc private func removeModel() {
+        let names = model.voices.map(\.displayName).joined(separator: ", ")
+        let alert = NSAlert()
+        alert.messageText = "Remove \(names)?"
+        alert.informativeText = "This frees ~\(model.approxSizeMB) MB. You can download it again anytime from the Voice Library."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        appDelegate.removeCatalogModel(model)
+        refreshInstallationStatus()
+        onInstalled()
     }
 }
 

@@ -516,6 +516,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Remove a downloaded voice model: free any RAM it held, delete it from
+    /// disk, and - if the active voice belonged to it - fall back to a still-
+    /// usable voice so the app is never left pointing at a deleted or
+    /// unspeakable voice.
+    @discardableResult
+    func removeCatalogModel(_ model: CatalogModel) -> Bool {
+        guard let engine else { return false }
+        let removedIDs = Set(model.voices.map {
+            VoiceInfo.namespaced(provider: model.engine, local: $0.localID)
+        })
+
+        // Re-home the active voice BEFORE deleting, so any in-flight synthesis
+        // using this model is stopped and currentVoice never dangles.
+        if removedIDs.contains(selectedVoiceName) {
+            let fallback: String
+            if engine.isKokoroEnabled {
+                fallback = "af_heart"
+            } else if let other = engine.availableVoices.first(where: {
+                !removedIDs.contains($0.id)
+            }) {
+                fallback = other.id
+            } else {
+                // No non-Kokoro voice would remain and Kokoro is off - turn it
+                // back on so the app always has something to speak with.
+                engine.setKokoroEnabled(true)
+                defaults.set(false, forKey: Pref.kokoroDisabled)
+                fallback = "af_heart"
+            }
+            setSelectedVoice(fallback)
+        }
+
+        let removed = engine.uninstall(model)
+        engine.reloadCatalog()
+        rebuildMenu()
+        oratorWindowController?.refresh()
+        return removed
+    }
+
     func isInstalled(_ model: CatalogModel) -> Bool {
         engine?.isInstalled(model) ?? false
     }
