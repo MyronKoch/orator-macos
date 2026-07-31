@@ -57,6 +57,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         static let speed = "speed"
         static let autoCast = "autoCast"
         static let kokoroDisabled = "kokoroDisabled"
+        // Set once the user has opted into cloud voices (which send text off the
+        // Mac). Gates the first cloud-voice selection with a loud warning.
+        static let cloudEgressAcknowledged = "cloudEgressAcknowledged"
         // Set once Accessibility has ever been granted. If we later launch
         // untrusted with this flag set, the TCC entry went stale after a
         // re-signed rebuild - we self-heal it (see healStaleAccessibilityGrant).
@@ -526,11 +529,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func setSelectedVoice(_ name: String) {
         guard let engine, engine.canSpeak(voiceID: name) else { return }
+        // Cloud voices send your text off the Mac - gate the first one with a
+        // loud, one-time opt-in. Declining leaves the current voice unchanged.
+        if VoiceInfo.providerID(of: name) == "cf", !confirmCloudEgressIfNeeded() { return }
         queuePlaybackActive = false
         engine.stop()
         engine.currentVoice = name
         defaults.set(name, forKey: Pref.voice)
         rebuildMenu()
+    }
+
+    /// One-time data-egress warning before the first cloud-voice use. Cloud
+    /// voices are the deliberate exception to Orator's on-device promise: the
+    /// text you read is sent to Cloudflare/Deepgram. Returns true to proceed.
+    private func confirmCloudEgressIfNeeded() -> Bool {
+        if defaults.bool(forKey: Pref.cloudEgressAcknowledged) { return true }
+        let alert = NSAlert()
+        alert.messageText = "Cloud voices send your text off your Mac"
+        alert.informativeText = """
+        You picked a CLOUD voice. Every time you use it, the text you're reading \
+        is sent over the internet to Cloudflare and Deepgram to be turned into \
+        speech. It does NOT stay on your Mac like Orator's built-in voices.
+
+        Do not use cloud voices for anything private or sensitive. Continue?
+        """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Use Cloud Voices")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        defaults.set(true, forKey: Pref.cloudEgressAcknowledged)
+        return true
     }
 
     func setKokoroDisabled(_ disabled: Bool) {

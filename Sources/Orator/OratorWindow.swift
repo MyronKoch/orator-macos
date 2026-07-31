@@ -1194,6 +1194,35 @@ private final class VoicesSettingsViewController: NSViewController {
             }
         }
 
+        // Cloud (Cloudflare Workers AI) voices, grouped by model. These send text
+        // off the Mac - the picker labels them; a one-time warning gates first use.
+        let cloudSections: [(title: String, prefix: String)] = [
+            ("Aura-2 (cloud · pro)", "cf:aura-2:"),
+            ("Aura-1 (cloud · pro)", "cf:aura-1:"),
+            ("MeloTTS (cloud · free)", "cf:melotts:"),
+        ]
+        for section in cloudSections {
+            let sectionVoices = appDelegate.availableVoices.filter {
+                $0.id.hasPrefix(section.prefix)
+            }
+            guard !sectionVoices.isEmpty else { continue }
+            if !(voicePopup.menu?.items.isEmpty ?? true) {
+                voicePopup.menu?.addItem(.separator())
+            }
+            let header = NSMenuItem(title: section.title, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            voicePopup.menu?.addItem(header)
+            for voice in sectionVoices {
+                let item = NSMenuItem(
+                    title: appDelegate.displayName(for: voice.id),
+                    action: nil,
+                    keyEquivalent: ""
+                )
+                item.representedObject = voice.id
+                voicePopup.menu?.addItem(item)
+            }
+        }
+
         if let index = voicePopup.menu?.items.firstIndex(where: {
             ($0.representedObject as? String) == appDelegate.selectedVoiceName
         }) {

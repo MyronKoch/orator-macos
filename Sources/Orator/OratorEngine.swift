@@ -107,6 +107,13 @@ final class OratorEngine: @unchecked Sendable {
     private let maxLoadedModels = 2              // cap resident sherpa models
     private let providerLock = NSLock()
 
+    /// Cloud voices (Cloudflare Workers AI: Deepgram Aura + MeloTTS). Nil when no
+    /// credentials are configured, which cleanly hides all cloud voices. This is
+    /// a DEV-only path (see CloudTTSProvider) - not for a published build. Every
+    /// cloud call is METERED from day one through `cloudMeter`.
+    let cloudMeter = CloudUsageMeter()
+    private let cloud: CloudTTSProvider?
+
     /// VoiceInfos a catalog model declares, without loading it.
     private func catalogVoiceInfos(for model: CatalogModel) -> [VoiceInfo] {
         model.voices.map { voice in
@@ -160,6 +167,9 @@ final class OratorEngine: @unchecked Sendable {
     /// a background/synth thread: it may block loading the model. UI validation
     /// uses `canSpeak(voiceID:)` instead, which never loads.
     private func provider(for voiceID: String) -> TTSProvider? {
+        if VoiceInfo.providerID(of: voiceID) == "cf" {
+            return cloud
+        }
         if let model = VoiceCatalog.model(forVoiceID: voiceID),
            isInstalled(model),
            let provider = loadedProvider(for: model) {
@@ -198,8 +208,13 @@ final class OratorEngine: @unchecked Sendable {
         let catalogVoices = VoiceCatalog.models
             .filter { isInstalled($0) }
             .flatMap { catalogVoiceInfos(for: $0) }
-        return (kokoroProvider()?.voices() ?? []) + catalogVoices
+        // Cloud voices need no install - always listed when credentials exist.
+        let cloudVoices = cloud?.voices() ?? []
+        return (kokoroProvider()?.voices() ?? []) + catalogVoices + cloudVoices
     }
+
+    /// Whether cloud (Cloudflare) voices are configured and selectable.
+    var isCloudAvailable: Bool { cloud != nil }
 
     /// Kitten (sherpa-onnx) voices only, or empty when that engine isn't loaded.
     /// Their ids are namespaced (`kitten:0`...); Kokoro voices stay bare names in
@@ -223,6 +238,9 @@ final class OratorEngine: @unchecked Sendable {
     /// namespaced id like `kitten:0`). Catalog/disk-based, so it never triggers a
     /// model load - safe to call from the UI to validate a selection.
     func canSpeak(voiceID: String) -> Bool {
+        if VoiceInfo.providerID(of: voiceID) == "cf" {
+            return cloud?.canSpeak(voiceID: voiceID) ?? false
+        }
         if let model = VoiceCatalog.model(forVoiceID: voiceID) {
             return isInstalled(model)
         }
@@ -352,6 +370,8 @@ final class OratorEngine: @unchecked Sendable {
         let loadedKokoro = try KokoroProvider(modelPath: modelPath, voicesPath: voicesPath)
         kokoro = loadedKokoro
         // Sherpa models are NOT eager-loaded; they load lazily on first use.
+        // Cloud provider is nil unless credentials are configured (DEV only).
+        cloud = CloudTTSProvider(meter: cloudMeter)
 
         format = AVAudioFormat(
             standardFormatWithSampleRate: loadedKokoro.sampleRate,
