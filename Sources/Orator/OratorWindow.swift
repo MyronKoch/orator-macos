@@ -1068,13 +1068,14 @@ private final class VoicesSettingsViewController: NSViewController {
         let realModifiers: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
         guard modifiers.intersection(realModifiers).isEmpty else { return false }
 
-        // Up/Down arrows audition too (matching the popup's up/down chevrons), but
-        // yield to a focused speed popup or table view (the sidebar / Voice
-        // Library) that legitimately navigates with arrow keys.
+        // Up/Down arrows audition too (matching the popup's up/down chevrons).
+        // Do NOT yield to the sidebar table - it holds first-responder focus when
+        // the dropdown is closed, so yielding to it made arrows navigate AWAY from
+        // the Voices tab instead of stepping voices. On the Voices tab, arrows are
+        // ours; only a deliberately-focused speed popup keeps native arrow behavior.
         if let value = characters?.unicodeScalars.first.map({ Int($0.value) }),
            value == NSUpArrowFunctionKey || value == NSDownArrowFunctionKey {
-            let responder = window.firstResponder
-            if responder === speedPopup || responder is NSTableView { return false }
+            if window.firstResponder === speedPopup { return false }
             stepVoice(value == NSUpArrowFunctionKey ? -1 : 1)
             return true
         }
