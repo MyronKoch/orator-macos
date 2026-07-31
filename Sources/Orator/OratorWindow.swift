@@ -962,8 +962,9 @@ private final class VoicesSettingsViewController: NSViewController {
                 self?.syncAutoCastState()
             }
         }
-        // Audition voices from the keyboard: [ = previous, ] = next, each auto-previews.
-        // Local monitors deliver on the main thread; scoped below to when this tab is showing.
+        // Audition voices from the keyboard: Up/Down arrows (or [ / ]) = previous/next,
+        // each auto-previews. Local monitors deliver on the main thread; scoped below
+        // to when this tab is showing.
         voiceKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             // Extract Sendable primitives here; never move the non-Sendable NSEvent
@@ -1054,13 +1055,30 @@ private final class VoicesSettingsViewController: NSViewController {
         return scrollView
     }
 
-    /// [ / ] step through the voice list and auto-preview, but only while the Voices
-    /// tab is actually on screen (display(_:) removes off-screen tabs, so voicePopup.window
-    /// is nil for other tabs) and not while editing text. Returns true if it consumed the key.
+    /// Up/Down arrows (and [ / ]) step through the voice list and auto-preview,
+    /// but only while the Voices tab is actually on screen (display(_:) removes
+    /// off-screen tabs, so voicePopup.window is nil for other tabs) and not while
+    /// editing text. Returns true if it consumed the key.
     private func handleVoiceKey(characters: String?, modifiers: NSEvent.ModifierFlags) -> Bool {
         guard let window = voicePopup.window, window.isKeyWindow, voicePopup.isEnabled else { return false }
         if let editor = window.firstResponder as? NSText, editor.isFieldEditor { return false }
-        guard modifiers.intersection(.deviceIndependentFlagsMask).isEmpty else { return false }
+        // Disqualify real modifier chords (cmd/opt/ctrl/shift). Arrow keys also
+        // report .function/.numericPad, which must NOT count as a real modifier -
+        // the old .deviceIndependentFlagsMask check silently rejected arrows.
+        let realModifiers: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+        guard modifiers.intersection(realModifiers).isEmpty else { return false }
+
+        // Up/Down arrows audition too (matching the popup's up/down chevrons), but
+        // yield to a focused speed popup or table view (the sidebar / Voice
+        // Library) that legitimately navigates with arrow keys.
+        if let value = characters?.unicodeScalars.first.map({ Int($0.value) }),
+           value == NSUpArrowFunctionKey || value == NSDownArrowFunctionKey {
+            let responder = window.firstResponder
+            if responder === speedPopup || responder is NSTableView { return false }
+            stepVoice(value == NSUpArrowFunctionKey ? -1 : 1)
+            return true
+        }
+
         switch characters {
         case "]": stepVoice(1); return true
         case "[": stepVoice(-1); return true
