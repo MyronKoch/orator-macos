@@ -100,11 +100,60 @@ final class TimelineView: NSView {
     }
 
     func zoomIn() {
-        pixelsPerSecond *= 1.25
+        zoom(by: 1.25, anchorX: visibleCenterX)
     }
 
     func zoomOut() {
-        pixelsPerSecond /= 1.25
+        zoom(by: 1 / 1.25, anchorX: visibleCenterX)
+    }
+
+    /// Trackpad pinch. `magnification` is a per-event DELTA (roughly -1...1), so
+    /// the scale factor is 1 + delta rather than the value itself.
+    override func magnify(with event: NSEvent) {
+        guard event.magnification != 0 else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        zoom(by: 1 + event.magnification, anchorX: point.x)
+    }
+
+    /// Option + two-finger scroll also zooms, the DAW convention, so the gesture
+    /// works for a mouse as well as a trackpad.
+    override func scrollWheel(with event: NSEvent) {
+        guard event.modifierFlags.contains(.option) else {
+            super.scrollWheel(with: event)
+            return
+        }
+        let delta = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / 100 : event.deltaY / 10
+        guard delta != 0 else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        zoom(by: 1 + delta, anchorX: point.x)
+    }
+
+    private var visibleCenterX: CGFloat {
+        guard let scrollView = enclosingScrollView else { return bounds.midX }
+        return scrollView.documentVisibleRect.midX
+    }
+
+    /// Scale the zoom while PINNING the moment under `anchorX` in place. Without
+    /// this the content slides out from under the fingers, which is what makes a
+    /// naive pinch feel broken. Remember the time at the anchor, rescale, then
+    /// scroll so that time lands back at the same on-screen position.
+    private func zoom(by factor: CGFloat, anchorX: CGFloat) {
+        let anchorMS = xToMS(anchorX)
+        let previous = pixelsPerSecond
+        pixelsPerSecond = previous * factor
+        guard pixelsPerSecond != previous else { return }
+
+        guard let scrollView = enclosingScrollView else { return }
+        // Lay out at the new width first, or the clip view clamps the scroll to
+        // the OLD document bounds and the anchor drifts at high zoom.
+        layoutSubtreeIfNeeded()
+        let visibleRect = scrollView.documentVisibleRect
+        let offsetOnScreen = anchorX - visibleRect.minX
+        let targetOriginX = max(0, msToX(anchorMS) - offsetOnScreen)
+        scrollView.contentView.scroll(
+            to: NSPoint(x: targetOriginX, y: visibleRect.origin.y)
+        )
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
     func zoomToFit(width: CGFloat) {

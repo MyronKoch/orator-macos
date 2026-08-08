@@ -19,6 +19,26 @@ final class TimelineAudio: @unchecked Sendable {
     /// clip's position or trim never forces a re-synthesis.
     private var cache: [String: [Float]] = [:]
 
+    /// Bumped to cancel an in-flight render. The render loop compares each
+    /// iteration against the generation it started with and bails when they
+    /// diverge, so Stop (or starting a second build) actually halts synthesis
+    /// instead of letting a long script grind on in the background.
+    private let renderLock = NSLock()
+    private var renderGeneration = 0
+
+    /// Cancel any render in flight. Safe to call from the main thread.
+    func cancelRender() {
+        renderLock.lock(); renderGeneration += 1; renderLock.unlock()
+    }
+
+    /// True while a render is running, so the UI can show Cancel instead of Build.
+    private(set) var isRendering = false
+
+    private func currentRenderGeneration() -> Int {
+        renderLock.lock(); defer { renderLock.unlock() }
+        return renderGeneration
+    }
+
     init(engine: OratorEngine) {
         self.engine = engine
     }
@@ -38,28 +58,47 @@ final class TimelineAudio: @unchecked Sendable {
     /// back a timeline whose `sourceDurationMS` are now REAL (replacing the
     /// pre-synthesis estimates). Clips that fail to render are left at duration
     /// zero rather than aborting the whole arrangement.
+    /// `completion` receives whatever was rendered; `cancelled` is true when the
+    /// run was halted early, so the caller can leave the timeline alone rather
+    /// than committing a half-rendered arrangement.
     func render(
         _ timeline: Timeline,
         progress: @escaping @MainActor @Sendable (Double) -> Void,
-        completion: @escaping @MainActor @Sendable (Timeline) -> Void
+        completion: @escaping @MainActor @Sendable (Timeline, Bool) -> Void
     ) {
+        // Starting a render supersedes any previous one.
+        cancelRender()
+        let generation = currentRenderGeneration()
+        isRendering = true
         queue.async { [self] in
             var updated = timeline
+            var cancelled = false
             let total = max(1, timeline.clips.count)
             for (index, clip) in timeline.clips.enumerated() {
+                guard currentRenderGeneration() == generation else {
+                    cancelled = true
+                    break
+                }
                 let key = cacheKey(clip)
                 var samples = cachedSamples(for: clip)
                 if samples == nil {
                     samples = try? engine.renderSamples(
                         text: clip.text, voiceID: clip.voiceID, speed: clip.speed
                     )
-                    if let samples {
+                    // Only cache a REAL result. Caching an empty array would mark
+                    // the clip permanently rendered-and-silent, so a transient
+                    // provider hiccup could never be retried.
+                    if let samples, !samples.isEmpty {
                         cacheLock.lock(); cache[key] = samples; cacheLock.unlock()
                     }
                 }
+                var resolved = clip
                 if let samples, !samples.isEmpty {
-                    var resolved = clip
-                    resolved.sourceDurationMS = Int(Double(samples.count) / sampleRate * 1000.0)
+                    // Round up: flooring to whole ms then back to frames drops the
+                    // trailing partial millisecond of EVERY clip.
+                    resolved.sourceDurationMS = Int(
+                        (Double(samples.count) / sampleRate * 1000.0).rounded(.up)
+                    )
                     // A stale trim from a previous, longer render would invert
                     // the clip - clamp both trims into the new source length.
                     resolved.trimStartMS = min(resolved.trimStartMS, max(0, resolved.sourceDurationMS - 50))
@@ -67,13 +106,25 @@ final class TimelineAudio: @unchecked Sendable {
                         resolved.trimEndMS,
                         max(0, resolved.sourceDurationMS - resolved.trimStartMS - 50)
                     )
-                    updated.update(resolved)
+                } else {
+                    // Render FAILED. fromCast seeded an estimate, which would
+                    // otherwise leave a normal-looking clip that occupies time and
+                    // plays nothing. Zero it so it reads as unrendered.
+                    resolved.sourceDurationMS = 0
+                    resolved.trimStartMS = 0
+                    resolved.trimEndMS = 0
                 }
+                updated.update(resolved)
                 let fraction = Double(index + 1) / Double(total)
                 DispatchQueue.main.async { progress(fraction) }
             }
             let result = updated
-            DispatchQueue.main.async { completion(result) }
+            let wasCancelled = cancelled
+            DispatchQueue.main.async { [self] in
+                // Only clear the flag if no NEWER render has started since.
+                if currentRenderGeneration() == generation { isRendering = false }
+                completion(result, wasCancelled)
+            }
         }
     }
 
@@ -89,16 +140,23 @@ final class TimelineAudio: @unchecked Sendable {
             guard clip.isRendered, let samples = cachedSamples(for: clip), !samples.isEmpty else {
                 continue
             }
-            let headFrames = Int(Double(clip.trimStartMS) / 1000.0 * sampleRate)
-            let audibleFrames = Int(Double(clip.durationMS) / 1000.0 * sampleRate)
-            let offset = Int(Double(clip.startMS) / 1000.0 * sampleRate)
-            guard audibleFrames > 0, headFrames < samples.count else { continue }
+            // Clamp every index to >= 0 before it touches an array. A clip with a
+            // negative startMS or trim (from a bad edit or a decoded document)
+            // would otherwise produce a negative index and TRAP, taking the app
+            // down mid-export.
+            let headFrames = max(0, Int(Double(clip.trimStartMS) / 1000.0 * sampleRate))
+            let audibleFrames = max(0, Int(Double(clip.durationMS) / 1000.0 * sampleRate))
+            let offset = max(0, Int(Double(clip.startMS) / 1000.0 * sampleRate))
+            guard audibleFrames > 0, headFrames < samples.count, offset < totalFrames else {
+                continue
+            }
 
             let available = min(audibleFrames, samples.count - headFrames)
             let writable = min(available, max(0, totalFrames - offset))
             guard writable > 0 else { continue }
+            let gain = timeline.gain(forTrack: clip.track)
             for frame in 0..<writable {
-                buffer[offset + frame] += samples[headFrames + frame]
+                buffer[offset + frame] += samples[headFrames + frame] * gain
             }
         }
 
