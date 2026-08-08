@@ -645,8 +645,16 @@ final class OratorEngine: @unchecked Sendable {
     /// reusing the engine's generation/cancellation machinery. `synthesisDone` is
     /// true up front because there is exactly one buffer and no synthesis loop
     /// following it, so the player going idle is the end of the utterance.
+    /// Play a mixdown starting `fromMS` into it. Seeking is possible precisely
+    /// BECAUSE the timeline plays one contiguous buffer: jumping is just
+    /// scheduling from a later frame, so a click during playback can restart at
+    /// the new spot and carry on. Callers add `fromMS` to `playbackPosition` to
+    /// get the true timeline position.
     @discardableResult
-    func playMixedBuffer(_ samples: [Float]) throws -> Int {
+    func playMixedBuffer(_ samples: [Float], fromMS: Int = 0) throws -> Int {
+        guard !samples.isEmpty else { return -1 }
+        let startFrame = max(0, min(samples.count, Int(Double(fromMS) / 1000.0 * format.sampleRate)))
+        let samples = startFrame > 0 ? Array(samples[startFrame...]) : samples
         guard !samples.isEmpty else { return -1 }
         lock.lock()
         generation += 1

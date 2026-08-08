@@ -466,15 +466,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engine.map { TimelineAudio(engine: $0) }
     }
 
-    /// Play a pre-mixed timeline buffer. Throws if the engine is unavailable.
-    func playTimelineMix(_ samples: [Float]) throws {
+    /// Play a pre-mixed timeline buffer, optionally starting partway in so a
+    /// click on the timeline can seek during playback.
+    func playTimelineMix(_ samples: [Float], fromMS: Int = 0) throws {
         guard let engine else {
             throw NSError(
                 domain: "Orator.Timeline", code: 1,
                 userInfo: [NSLocalizedDescriptionKey: "The speech engine is still loading"]
             )
         }
-        _ = try engine.playMixedBuffer(samples)
+        _ = try engine.playMixedBuffer(samples, fromMS: fromMS)
     }
 
     func stopTimelinePlayback() { engine?.stop() }
