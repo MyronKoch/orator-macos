@@ -28,6 +28,10 @@ final class ScriptSettingsViewController: NSViewController,
     private lazy var timelineAudio: TimelineAudio? = appDelegate.makeTimelineAudio()
     private var timelineScrollView: NSScrollView
     private var playheadTimer: Timer?
+    /// Where the currently-playing buffer starts on the timeline. The engine
+    /// reports position within the buffer it was handed, so this offset turns
+    /// that back into an absolute timeline position after a seek.
+    private var timelinePlaybackOriginMS = 0
     private var isRenderingTimeline = false
     private var timelineRenderID: UUID?
     private let buildTimelineButton = NSButton(title: "Build Timeline", target: nil, action: nil)
@@ -259,10 +263,19 @@ final class ScriptSettingsViewController: NSViewController,
             self?.timelineChanged(updated)
         }
         timelineView.onScrub = { [weak self] ms in
-            self?.setTimelinePlayhead(ms)
+            guard let self else { return }
+            self.setTimelinePlayhead(ms)
+            // Clicking the ruler WHILE PLAYING jumps there and keeps going, the
+            // behaviour every editor has. When stopped it just parks the head.
+            if self.appDelegate.isEnginePlaying {
+                self.playTimeline(fromMS: ms)
+            }
         }
         timelineView.onEditClip = { [weak self] id in
             self?.editClip(id)
+        }
+        timelineView.onTogglePlayback = { [weak self] in
+            self?.toggleTimelinePlayback()
         }
         timelineScrollView.hasHorizontalScroller = true
         timelineScrollView.hasVerticalScroller = true
@@ -732,21 +745,33 @@ final class ScriptSettingsViewController: NSViewController,
     }
 
     @objc private func playTimeline() {
+        playTimeline(fromMS: timelineView.playheadMS)
+    }
+
+    /// Start (or restart) playback at `fromMS`. Restarting from a new offset is
+    /// how seeking works: the mixdown is one contiguous buffer, so a click during
+    /// playback re-schedules from that frame and carries on.
+    private func playTimeline(fromMS: Int) {
         guard let audio = timelineAudio else { return }
         let samples = audio.mixdown(timelineView.timeline)
         guard !samples.isEmpty else {
             timelineStatus.stringValue = "Nothing to play. Build the timeline first."
             return
         }
+        let total = timelineView.timeline.totalDurationMS
+        // Starting at (or past) the end would play nothing - wrap to the top so
+        // pressing play with the head parked at the end still reads the piece.
+        let start = (fromMS >= total) ? 0 : max(0, fromMS)
         do {
-            try appDelegate.playTimelineMix(samples)
+            try appDelegate.playTimelineMix(samples, fromMS: start)
         } catch {
             timelineStatus.stringValue = "Couldn't start playback: \(error.localizedDescription)"
             updateTimelineControls()
             return
         }
 
-        setTimelinePlayhead(0)
+        timelinePlaybackOriginMS = start
+        setTimelinePlayhead(start)
         updateTimelineControls()
         playheadTimer?.invalidate()
         // Never touch the Timer parameter inside the isolated block: Timer is not
@@ -757,7 +782,9 @@ final class ScriptSettingsViewController: NSViewController,
         let timer = Timer(timeInterval: 0.03, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                self.setTimelinePlayhead(Int(
+                // playbackPosition is relative to the buffer we scheduled, which
+                // starts at the seek point - add it back for the true position.
+                self.setTimelinePlayhead(self.timelinePlaybackOriginMS + Int(
                     (self.appDelegate.playbackPositionSeconds ?? 0) * 1000
                 ))
                 if !self.appDelegate.isEnginePlaying {

@@ -40,6 +40,9 @@ final class TimelineView: NSView {
     var onSelectionChanged: ((UUID?) -> Void)?
     var onScrub: ((Int) -> Void)?
     var onEditClip: ((UUID) -> Void)?
+    /// Spacebar transport toggle. The host owns playback state, so the view just
+    /// reports the intent.
+    var onTogglePlayback: (() -> Void)?
 
     private let gutterWidth: CGFloat = 96
     private let rulerHeight: CGFloat = 22
@@ -349,7 +352,13 @@ final class TimelineView: NSView {
         let shift = modifiers.contains(.shift)
         let characters = event.charactersIgnoringModifiers ?? ""
 
-        if event.keyCode == 51 || event.keyCode == 117 {
+        // Spacebar toggles playback, the transport convention in every editor.
+        // Scoped to this view's key handling ON PURPOSE: the Script tab has a
+        // text view right above, and space must keep typing a space there. The
+        // timeline only sees this after a click makes it first responder.
+        if event.keyCode == 49 {
+            onTogglePlayback?()
+        } else if event.keyCode == 51 || event.keyCode == 117 {
             deleteSelected()
         } else if command, characters.lowercased() == "c" {
             copySelected()
