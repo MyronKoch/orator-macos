@@ -12,10 +12,15 @@ struct SpeechSegment: Sendable {
     /// which is what every non-script caller wants. Script mode sets it so one
     /// character can rattle while another takes their time.
     let speed: Float?
+    /// Who is speaking ("SARAH"), when the segment came from a cast script.
+    /// Nil for plain reading. Carried so the timeline editor can label a clip
+    /// and give each character their own track; playback ignores it.
+    let speaker: String?
 
-    init(text: String, voiceName: String, speed: Float? = nil) {
+    init(text: String, voiceName: String, speed: Float? = nil, speaker: String? = nil) {
         self.text = text
         self.voiceName = voiceName
         self.speed = speed
+        self.speaker = speaker
     }
 }
