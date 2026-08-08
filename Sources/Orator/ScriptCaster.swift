@@ -5,6 +5,12 @@ enum ScriptCaster {
         var readSceneHeadings = false
         var readParentheticals = false
         var readTransitions = false
+        /// Fuse consecutive lines by the same speaker into one segment. Right for
+        /// a table read (fewer, longer utterances start faster), WRONG for the
+        /// timeline editor, where every line must stay an independently
+        /// draggable clip - otherwise a character's whole monologue becomes one
+        /// enormous unmovable block.
+        var mergeConsecutive = true
     }
 
     static func cast(
@@ -21,23 +27,43 @@ enum ScriptCaster {
                 speaker = name
             case .dialogue(let text):
                 guard let speaker, let voice = cast.characterVoices[speaker] else { continue }
-                append(text, voice: voice, speaker: speaker, to: &segments)
+                append(
+                    text, voice: voice, speaker: speaker,
+                    speed: cast.characterSpeeds[speaker],
+                    merge: options.mergeConsecutive, to: &segments
+                )
             case .action(let text):
                 speaker = nil
-                append(text, voice: cast.narratorVoice, speaker: nil, to: &segments)
+                append(
+                    text, voice: cast.narratorVoice, speaker: nil,
+                    speed: cast.characterSpeeds["Narrator"],
+                    merge: options.mergeConsecutive, to: &segments
+                )
             case .sceneHeading(let text):
                 speaker = nil
                 if options.readSceneHeadings {
-                    append(text, voice: cast.narratorVoice, speaker: nil, to: &segments)
+                    append(
+                    text, voice: cast.narratorVoice, speaker: nil,
+                    speed: cast.characterSpeeds["Narrator"],
+                    merge: options.mergeConsecutive, to: &segments
+                )
                 }
             case .parenthetical(let text):
                 if options.readParentheticals {
-                    append(text, voice: cast.narratorVoice, speaker: speaker, to: &segments)
+                    append(
+                        text, voice: cast.narratorVoice, speaker: speaker,
+                        speed: cast.characterSpeeds["Narrator"],
+                        merge: options.mergeConsecutive, to: &segments
+                    )
                 }
             case .transition(let text):
                 speaker = nil
                 if options.readTransitions {
-                    append(text, voice: cast.narratorVoice, speaker: nil, to: &segments)
+                    append(
+                    text, voice: cast.narratorVoice, speaker: nil,
+                    speed: cast.characterSpeeds["Narrator"],
+                    merge: options.mergeConsecutive, to: &segments
+                )
                 }
             }
         }
@@ -48,6 +74,8 @@ enum ScriptCaster {
         _ text: String,
         voice: String,
         speaker: String?,
+        speed: Float?,
+        merge: Bool,
         to segments: inout [SpeechSegment]
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -55,15 +83,17 @@ enum ScriptCaster {
         // Merge only when the SPEAKER matches too, not just the voice. Two
         // characters sharing one voice must stay separate segments or they would
         // collapse into a single mislabelled clip on the timeline.
-        if let last = segments.last, last.voiceName == voice, last.speaker == speaker {
+        if merge, let last = segments.last, last.voiceName == voice, last.speaker == speaker {
             segments[segments.count - 1] = SpeechSegment(
                 text: last.text + "\n" + trimmed,
                 voiceName: voice,
-                speed: last.speed,
+                speed: last.speed ?? speed,
                 speaker: speaker
             )
         } else {
-            segments.append(SpeechSegment(text: trimmed, voiceName: voice, speaker: speaker))
+            segments.append(
+                SpeechSegment(text: trimmed, voiceName: voice, speed: speed, speaker: speaker)
+            )
         }
     }
 }

@@ -615,19 +615,26 @@ final class OratorEngine: @unchecked Sendable {
     /// can mix results from different providers into one buffer. Blocking - call
     /// off the main thread. This is what the timeline uses to render clips.
     func renderSamples(text: String, voiceID: String, speed: Float?) throws -> [Float] {
-        guard let renderProvider = provider(for: voiceID) else {
-            throw OratorError.voiceNotFound(voiceID)
+        // MUST run on synthQueue. All inference is serialized there, and the
+        // timeline renders from its OWN queue - calling the provider directly
+        // would let timeline synthesis run concurrently with a table read (or a
+        // second timeline), which breaks the "all MLX inference is serialized"
+        // contract and can corrupt native inference state.
+        try synthQueue.sync {
+            guard let renderProvider = provider(for: voiceID) else {
+                throw OratorError.voiceNotFound(voiceID)
+            }
+            let rate = speed ?? self.speed
+            var out: [Float] = []
+            for chunk in TextChunker.chunk(text) {
+                let samples = try renderProvider.synthesize(
+                    text: chunk, voiceID: voiceID, speed: rate
+                ).samples
+                guard !samples.isEmpty else { continue }
+                out += resample(samples, from: renderProvider.sampleRate, to: format.sampleRate)
+            }
+            return out
         }
-        let rate = speed ?? self.speed
-        var out: [Float] = []
-        for chunk in TextChunker.chunk(text) {
-            let samples = try renderProvider.synthesize(
-                text: chunk, voiceID: voiceID, speed: rate
-            ).samples
-            guard !samples.isEmpty else { continue }
-            out += resample(samples, from: renderProvider.sampleRate, to: format.sampleRate)
-        }
-        return out
     }
 
     /// The engine's output sample rate - the common rate every timeline clip is
@@ -652,7 +659,17 @@ final class OratorEngine: @unchecked Sendable {
 
         player.stop()
         if !audioEngine.isRunning {
-            try audioEngine.start()
+            do {
+                try audioEngine.start()
+            } catch {
+                // Roll the state back, or `speaking` stays true forever and the
+                // caller's playhead timer never stops.
+                lock.lock()
+                speaking = false
+                _paused = false
+                lock.unlock()
+                throw error
+            }
             refreshOutputLatency()
         }
         player.play()

@@ -53,6 +53,37 @@ struct Timeline: Codable, Sendable, Equatable {
     /// Rows to display, at least one more than the highest occupied track so
     /// there is always an empty row to drag into.
     var trackCount: Int = 3
+    /// Per-track linear gain (1.0 = unity), applied at mixdown. Absent tracks are
+    /// unity, so an untouched arrangement stores nothing.
+    var trackGains: [Int: Float] = [:]
+
+    /// Tolerant decoding: fields added after a session file was written decode to
+    /// their defaults instead of failing the whole document. This is what lets an
+    /// older saved session still open after the format grows.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        clips = try container.decodeIfPresent([TimelineClip].self, forKey: .clips) ?? []
+        trackCount = try container.decodeIfPresent(Int.self, forKey: .trackCount) ?? 3
+        trackGains = try container.decodeIfPresent([Int: Float].self, forKey: .trackGains) ?? [:]
+    }
+
+    init(clips: [TimelineClip] = [], trackCount: Int = 3, trackGains: [Int: Float] = [:]) {
+        self.clips = clips
+        self.trackCount = trackCount
+        self.trackGains = trackGains
+    }
+
+    /// Linear gain for a track, defaulting to unity.
+    func gain(forTrack track: Int) -> Float { trackGains[track] ?? 1.0 }
+
+    mutating func setGain(_ gain: Float, forTrack track: Int) {
+        let clamped = min(2.0, max(0, gain))
+        if abs(clamped - 1.0) < 0.001 {
+            trackGains.removeValue(forKey: track)
+        } else {
+            trackGains[track] = clamped
+        }
+    }
 
     /// Gap inserted after the last clip when appending without explicit timing.
     /// (Voicebox uses the same 200 ms breath.)
@@ -116,10 +147,14 @@ struct Timeline: Codable, Sendable, Equatable {
     mutating func move(id: UUID, toTrack track: Int, startMS: Int) -> Bool {
         guard var clip = clip(id: id) else { return false }
         let target = max(0, startMS)
-        guard !wouldOverlap(id: id, track: track, startMS: target, durationMS: clip.durationMS) else {
-            return false
-        }
-        clip.track = max(0, track)
+        // Clamp FIRST, then validate. Validating the raw track and writing the
+        // clamped one let a move to track -1 pass an overlap check against a
+        // nonexistent row and then land on track 0 straight through a clip.
+        let destination = max(0, track)
+        guard !wouldOverlap(
+            id: id, track: destination, startMS: target, durationMS: clip.durationMS
+        ) else { return false }
+        clip.track = destination
         clip.startMS = target
         update(clip)
         return true
@@ -169,7 +204,43 @@ struct Timeline: Codable, Sendable, Equatable {
             let maxTail = clip.sourceDurationMS - clip.trimStartMS - minimum
             clip.trimEndMS = min(max(0, clip.trimEndMS + tailDeltaMS), max(0, maxTail))
         }
+        // Lengthening a clip (a negative delta) can run it into its neighbour, so
+        // the no-overlap invariant has to be enforced HERE, in the model, not
+        // just rolled back by whichever view happened to call it.
+        guard !wouldOverlap(
+            id: id, track: clip.track, startMS: clip.startMS, durationMS: clip.durationMS
+        ) else { return }
         update(clip)
+    }
+
+    /// Razor: cut a clip in two at an absolute timeline position.
+    ///
+    /// Both halves keep the SAME source audio and text; only the trims move, so
+    /// the cut is non-destructive and either half can be trimmed back out. The
+    /// tail piece starts exactly where the head ends, so a split never disturbs
+    /// surrounding clips or violates the no-overlap rule.
+    ///
+    /// Returns the new (tail) clip's id, or nil if the cut point is not strictly
+    /// inside the clip or either resulting piece would be shorter than 50 ms.
+    @discardableResult
+    mutating func split(id: UUID, atMS cutMS: Int) -> UUID? {
+        guard let original = clip(id: id), original.isRendered else { return nil }
+        let minimum = 50
+        let headLength = cutMS - original.startMS
+        let tailLength = original.endMS - cutMS
+        guard headLength >= minimum, tailLength >= minimum else { return nil }
+
+        var head = original
+        head.trimEndMS = original.trimEndMS + tailLength
+
+        var tail = original
+        tail.id = UUID()
+        tail.startMS = cutMS
+        tail.trimStartMS = original.trimStartMS + headLength
+
+        update(head)
+        add(tail)
+        return tail.id
     }
 
     /// Copy a clip onto the first free spot after the original.
