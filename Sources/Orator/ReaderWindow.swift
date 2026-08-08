@@ -53,6 +53,9 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
     private let highlightAutoButton = NSButton()
     private var highlightOverlay: ReaderHighlightOverlayView!
     private var highlightedRange: NSRange?
+    /// The sentence currently washed. Cached so the wash is re-applied only when
+    /// the sentence actually changes (see updateSentenceWash).
+    private var highlightedSentenceRange: NSRange?
     private var suppressAutoScrollUntil: TimeInterval = 0
 
     // Reader text size (⌘+/⌘-/⌘0), persisted across sessions.
@@ -522,6 +525,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         else { return }
 
         highlightedRange = range
+        updateSentenceWash(around: range)
         highlightOverlay.showWord(
             characterRange: range,
             duration: session.activeWordDuration
@@ -529,8 +533,76 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate,
         scrollToHighlightedWordIfNeeded(range)
     }
 
+    /// Soft wash over the whole sentence being read, under the word "ball", so
+    /// you keep your place in a paragraph.
+    ///
+    /// CRITICAL: only touch the layout manager when the SENTENCE CHANGES. A
+    /// previous version re-applied this over the whole sentence on every word
+    /// tick (~30/sec); the constant relayout of a large range desynced the word
+    /// highlight from the audio and got the feature reverted. Comparing against
+    /// the cached range makes it roughly one update per sentence instead of
+    /// thirty per second. The word highlight itself lives in a separate overlay
+    /// view, so the two tiers no longer compete for the same attributes.
+    private func updateSentenceWash(around wordRange: NSRange) {
+        let sentence = Self.enclosingSentenceRange(for: wordRange, in: textView.string)
+        guard sentence != highlightedSentenceRange else { return }
+        if let previous = highlightedSentenceRange {
+            textView.layoutManager?.removeTemporaryAttribute(
+                .backgroundColor, forCharacterRange: previous
+            )
+        }
+        textView.layoutManager?.addTemporaryAttribute(
+            .backgroundColor,
+            // Deliberately faint and hue-independent of the word highlight,
+            // which the user can recolour - the wash must never compete with it.
+            value: NSColor.systemYellow.withAlphaComponent(0.16),
+            forCharacterRange: sentence
+        )
+        highlightedSentenceRange = sentence
+    }
+
+    /// Expand a word range to the sentence containing it, bounded by
+    /// sentence-ending punctuation or a line break. Scans outward from the word
+    /// rather than enumerating the document, so cost is proportional to the
+    /// sentence and not to the length of the article.
+    private static func enclosingSentenceRange(
+        for wordRange: NSRange, in text: String
+    ) -> NSRange {
+        let ns = text as NSString
+        let length = ns.length
+        guard length > 0, wordRange.location != NSNotFound else { return wordRange }
+        let boundaries = CharacterSet(charactersIn: ".!?;\n\r")
+
+        func isBoundary(at index: Int) -> Bool {
+            guard index >= 0, index < length else { return false }
+            guard let scalar = UnicodeScalar(ns.character(at: index)) else { return false }
+            return boundaries.contains(scalar)
+        }
+
+        var start = min(max(0, wordRange.location), max(0, length - 1))
+        while start > 0, !isBoundary(at: start - 1) { start -= 1 }
+        // Step past the punctuation and any whitespace that follows it.
+        while start < length,
+              let scalar = UnicodeScalar(ns.character(at: start)),
+              CharacterSet.whitespacesAndNewlines.contains(scalar) {
+            start += 1
+        }
+
+        var end = min(NSMaxRange(wordRange), length)
+        while end < length, !isBoundary(at: end) { end += 1 }
+        if end < length { end += 1 } // include the terminator itself
+        guard end > start else { return wordRange }
+        return NSRange(location: start, length: end - start)
+    }
+
     private func clearHighlight() {
         highlightedRange = nil
+        if let sentence = highlightedSentenceRange {
+            textView.layoutManager?.removeTemporaryAttribute(
+                .backgroundColor, forCharacterRange: sentence
+            )
+            highlightedSentenceRange = nil
+        }
         highlightOverlay?.clear(animated: true)
     }
 

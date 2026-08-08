@@ -1,5 +1,10 @@
 import Cocoa
 
+enum TimelineTool: Equatable {
+    case pointer
+    case razor
+}
+
 /// An AppKit timeline editor for arranging, trimming, and inspecting speech clips.
 @MainActor
 final class TimelineView: NSView {
@@ -7,6 +12,7 @@ final class TimelineView: NSView {
         didSet {
             needsDisplay = true
             invalidateIntrinsicContentSize()
+            window?.invalidateCursorRects(for: self)
         }
     }
 
@@ -16,6 +22,17 @@ final class TimelineView: NSView {
 
     var playheadMS: Int {
         didSet { needsDisplay = true }
+    }
+
+    var tool: TimelineTool = .pointer {
+        didSet {
+            guard tool != oldValue else { return }
+            razorHover = nil
+            needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+            refreshCursor()
+            onToolChanged?(tool)
+        }
     }
 
     var pixelsPerSecond: CGFloat {
@@ -40,11 +57,12 @@ final class TimelineView: NSView {
     var onSelectionChanged: ((UUID?) -> Void)?
     var onScrub: ((Int) -> Void)?
     var onEditClip: ((UUID) -> Void)?
+    var onToolChanged: ((TimelineTool) -> Void)?
     /// Spacebar transport toggle. The host owns playback state, so the view just
     /// reports the intent.
     var onTogglePlayback: (() -> Void)?
 
-    private let gutterWidth: CGFloat = 96
+    private let gutterWidth: CGFloat = 132
     private let rulerHeight: CGFloat = 22
     private let trackHeight: CGFloat = 56
     private let trailingSlack: CGFloat = 240
@@ -52,10 +70,11 @@ final class TimelineView: NSView {
     private var clipboard: TimelineClip?
     private var trackingArea: NSTrackingArea?
 
-    private enum DragMode {
+    private enum DragMode: Equatable {
         case move
         case trimHead
         case trimTail
+        case faderDrag(track: Int)
     }
 
     private var dragMode: DragMode?
@@ -64,6 +83,7 @@ final class TimelineView: NSView {
     private var grabOffsetMS = 0
     private var previousDragMS = 0
     private var isScrubbing = false
+    private var razorHover: (clipID: UUID, x: CGFloat)?
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -218,6 +238,7 @@ final class TimelineView: NSView {
         drawTracks(in: dirtyRect)
         drawRuler(in: dirtyRect)
         drawClips(in: dirtyRect)
+        drawRazorPreview(in: dirtyRect)
         drawPlayhead(in: dirtyRect)
         // The document view scrolls beneath this final overlay, keeping headers pinned.
         drawGutter(in: dirtyRect)
@@ -226,7 +247,7 @@ final class TimelineView: NSView {
     override func updateTrackingAreas() {
         if let trackingArea { removeTrackingArea(trackingArea) }
         let options: NSTrackingArea.Options = [
-            .mouseMoved, .activeInKeyWindow, .inVisibleRect,
+            .mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect,
         ]
         let area = NSTrackingArea(rect: .zero, options: options, owner: self, userInfo: nil)
         addTrackingArea(area)
@@ -236,13 +257,55 @@ final class TimelineView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        guard point.x >= visibleGutterMaxX, let hit = hitTestClip(at: point) else {
-            NSCursor.arrow.set()
-            return
+        if tool == .razor {
+            if point.x >= visibleGutterMaxX, let hit = hitTestClip(at: point) {
+                razorHover = (hit.clip.id, point.x)
+                NSCursor.crosshair.set()
+            } else {
+                razorHover = nil
+                NSCursor.arrow.set()
+            }
+            needsDisplay = true
+        } else {
+            razorHover = nil
+            setPointerCursor(at: point)
         }
-        switch hit.zone {
-        case .trimHead, .trimTail: NSCursor.resizeLeftRight.set()
-        case .body: NSCursor.openHand.set()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        razorHover = nil
+        needsDisplay = true
+        NSCursor.arrow.set()
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .arrow)
+        for clip in timeline.clips {
+            let clipRect = clipRect(for: clip)
+            let exposedRect = clipRect.intersection(NSRect(
+                x: visibleGutterMaxX,
+                y: bounds.minY,
+                width: max(0, bounds.maxX - visibleGutterMaxX),
+                height: bounds.height
+            ))
+            guard !exposedRect.isEmpty else { continue }
+            if tool == .razor {
+                addCursorRect(exposedRect, cursor: .crosshair)
+            } else if clipRect.width < 15 {
+                addCursorRect(exposedRect, cursor: .openHand)
+            } else {
+                let body = clipRect.insetBy(dx: 7, dy: 0).intersection(exposedRect)
+                let head = NSRect(
+                    x: clipRect.minX, y: clipRect.minY, width: 7, height: clipRect.height
+                ).intersection(exposedRect)
+                let tail = NSRect(
+                    x: clipRect.maxX - 7, y: clipRect.minY, width: 7, height: clipRect.height
+                ).intersection(exposedRect)
+                if !body.isEmpty { addCursorRect(body, cursor: .openHand) }
+                if !head.isEmpty { addCursorRect(head, cursor: .resizeLeftRight) }
+                if !tail.isEmpty { addCursorRect(tail, cursor: .resizeLeftRight) }
+            }
         }
     }
 
@@ -250,14 +313,34 @@ final class TimelineView: NSView {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
 
-        if point.y < rulerHeight, point.x >= visibleGutterMaxX {
+        // Track controls own the entire pinned gutter. A miss here must not fall
+        // through into ruler scrubbing or clip selection behind the overlay.
+        if point.x < visibleGutterMaxX {
+            if let track = faderTrack(at: point) {
+                dragMode = .faderDrag(track: track)
+                dragSnapshot = timeline
+                updateFader(track: track, atX: point.x)
+            }
+            return
+        }
+
+        if point.y < rulerHeight {
             isScrubbing = true
             scrub(to: point)
             return
         }
 
-        guard point.x >= visibleGutterMaxX, let hit = hitTestClip(at: point) else {
+        guard let hit = hitTestClip(at: point) else {
             setSelection(nil)
+            return
+        }
+
+        if tool == .razor {
+            if let tailID = timeline.split(id: hit.clip.id, atMS: xToMS(point.x)) {
+                setSelection(tailID)
+                onTimelineChanged?(timeline)
+            }
+            needsDisplay = true
             return
         }
 
@@ -287,9 +370,12 @@ final class TimelineView: NSView {
             return
         }
 
-        guard let id = draggedClipID, let mode = dragMode else { return }
+        guard let mode = dragMode else { return }
         switch mode {
+        case .faderDrag(let track):
+            updateFader(track: track, atX: point.x)
         case .move:
+            guard let id = draggedClipID else { return }
             guard let clip = timeline.clip(id: id), timeline.trackCount > 0 else { return }
             let desiredStart = xToMS(point.x) - grabOffsetMS
             let snappedStart = snappedStartMS(for: clip, proposedStartMS: max(0, desiredStart))
@@ -306,6 +392,7 @@ final class TimelineView: NSView {
                 _ = timeline.move(id: id, toTrack: track, startMS: free)
             }
         case .trimHead, .trimTail:
+            guard let id = draggedClipID else { return }
             guard let beforeTrim = timeline.clip(id: id) else { return }
             let currentMS = xToMS(point.x)
             let delta = currentMS - previousDragMS
@@ -340,7 +427,7 @@ final class TimelineView: NSView {
         dragMode = nil
         draggedClipID = nil
         dragSnapshot = nil
-        NSCursor.arrow.set()
+        refreshCursor(at: point)
         if let snapshot, timeline != snapshot {
             onTimelineChanged?(timeline)
         }
@@ -382,6 +469,28 @@ final class TimelineView: NSView {
     private var visibleGutterMinX: CGFloat { visibleRect.minX }
     private var visibleGutterMaxX: CGFloat { visibleGutterMinX + gutterWidth }
 
+    private func faderGrooveRect(forTrack track: Int) -> NSRect {
+        NSRect(
+            x: visibleGutterMinX + 8,
+            y: rulerHeight + CGFloat(track) * trackHeight + 36,
+            width: 78,
+            height: 2
+        )
+    }
+
+    private func faderTrack(at point: NSPoint) -> Int? {
+        guard let track = trackIndex(at: point.y, clamped: false) else { return nil }
+        let hitRect = faderGrooveRect(forTrack: track).insetBy(dx: -5, dy: -9)
+        return hitRect.contains(point) ? track : nil
+    }
+
+    private func updateFader(track: Int, atX x: CGFloat) {
+        let groove = faderGrooveRect(forTrack: track)
+        let fraction = min(1, max(0, (x - groove.minX) / groove.width))
+        timeline.setGain(Float(fraction * 2), forTrack: track)
+        needsDisplay = true
+    }
+
     private func trackIndex(at y: CGFloat, clamped: Bool) -> Int? {
         guard timeline.trackCount > 0 else { return nil }
         let raw = Int(floor((y - rulerHeight) / trackHeight))
@@ -421,6 +530,37 @@ final class TimelineView: NSView {
             return (clip, .body)
         }
         return nil
+    }
+
+    private func setPointerCursor(at point: NSPoint) {
+        guard point.x >= visibleGutterMaxX, let hit = hitTestClip(at: point) else {
+            NSCursor.arrow.set()
+            return
+        }
+        switch hit.zone {
+        case .trimHead, .trimTail: NSCursor.resizeLeftRight.set()
+        case .body: NSCursor.openHand.set()
+        }
+    }
+
+    private func refreshCursor(at point: NSPoint? = nil) {
+        let location = point ?? window.map {
+            convert($0.mouseLocationOutsideOfEventStream, from: nil)
+        }
+        guard let location else {
+            NSCursor.arrow.set()
+            return
+        }
+        if tool == .razor,
+           location.x >= visibleGutterMaxX,
+           hitTestClip(at: location) != nil
+        {
+            NSCursor.crosshair.set()
+        } else if tool == .pointer {
+            setPointerCursor(at: location)
+        } else {
+            NSCursor.arrow.set()
+        }
     }
 
     private func snappedStartMS(for clip: TimelineClip, proposedStartMS: Int) -> Int {
@@ -599,6 +739,20 @@ final class TimelineView: NSView {
         label.draw(in: labelRect, withAttributes: attributes)
     }
 
+    private func drawRazorPreview(in dirtyRect: NSRect) {
+        guard tool == .razor,
+              let hover = razorHover,
+              let clip = timeline.clip(id: hover.clipID)
+        else { return }
+        let clipRect = clipRect(for: clip)
+        guard clipRect.intersects(dirtyRect),
+              hover.x >= clipRect.minX,
+              hover.x <= clipRect.maxX
+        else { return }
+        NSColor.systemRed.setFill()
+        NSRect(x: hover.x - 0.5, y: clipRect.minY, width: 1, height: clipRect.height).fill()
+    }
+
     private func drawPlayhead(in dirtyRect: NSRect) {
         let x = msToX(playheadMS)
         guard x >= dirtyRect.minX - 1, x <= dirtyRect.maxX + 1 else { return }
@@ -617,23 +771,47 @@ final class TimelineView: NSView {
         NSColor.windowBackgroundColor.setFill()
         gutterRect.fill()
 
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .right
-        paragraph.lineBreakMode = .byTruncatingTail
-        let attributes: [NSAttributedString.Key: Any] = [
+        let labelParagraph = NSMutableParagraphStyle()
+        labelParagraph.alignment = .left
+        labelParagraph.lineBreakMode = .byTruncatingTail
+        let labelAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 11),
             .foregroundColor: NSColor.secondaryLabelColor,
-            .paragraphStyle: paragraph,
+            .paragraphStyle: labelParagraph,
+        ]
+        let gainParagraph = NSMutableParagraphStyle()
+        gainParagraph.alignment = .right
+        let gainAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular),
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: gainParagraph,
         ]
         for track in 0..<max(0, timeline.trackCount) {
-            let rect = NSRect(
+            let labelRect = NSRect(
                 x: visibleGutterMinX + 8,
-                y: rulerHeight + CGFloat(track) * trackHeight + (trackHeight - 14) / 2,
+                y: rulerHeight + CGFloat(track) * trackHeight + 7,
                 width: gutterWidth - 16,
                 height: 14
             )
-            guard rect.intersects(dirtyRect) else { continue }
-            timeline.label(forTrack: track).draw(in: rect, withAttributes: attributes)
+            guard labelRect.intersects(dirtyRect) else { continue }
+            timeline.label(forTrack: track).draw(in: labelRect, withAttributes: labelAttributes)
+
+            let groove = faderGrooveRect(forTrack: track)
+            NSColor.separatorColor.setFill()
+            groove.fill()
+            let gain = min(2, max(0, timeline.gain(forTrack: track)))
+            let knobX = groove.minX + CGFloat(gain / 2) * groove.width
+            NSColor.controlAccentColor.setFill()
+            NSBezierPath(ovalIn: NSRect(x: knobX - 4.5, y: groove.midY - 4.5, width: 9, height: 9)).fill()
+
+            let gainText = gain == 0 ? "MUTE" : String(format: "%.1fx", gain)
+            let gainRect = NSRect(
+                x: groove.maxX + 4,
+                y: groove.midY - 6,
+                width: visibleGutterMaxX - groove.maxX - 10,
+                height: 12
+            )
+            gainText.draw(in: gainRect, withAttributes: gainAttributes)
         }
 
         NSColor.separatorColor.setFill()
