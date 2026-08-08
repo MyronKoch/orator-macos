@@ -457,6 +457,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var statsSnapshot: ReadingStatsSnapshot { stats.snapshot() }
     var reading: ReadingStats { stats }
 
+    // MARK: - Timeline editor bridge
+
+    /// The timeline editor needs the engine to render and play a mixdown, but
+    /// `engine` stays private like every other consumer here - these are the
+    /// narrow accessors it actually uses.
+    func makeTimelineAudio() -> TimelineAudio? {
+        engine.map { TimelineAudio(engine: $0) }
+    }
+
+    /// Play a pre-mixed timeline buffer. Throws if the engine is unavailable.
+    func playTimelineMix(_ samples: [Float]) throws {
+        guard let engine else {
+            throw NSError(
+                domain: "Orator.Timeline", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "The speech engine is still loading"]
+            )
+        }
+        _ = try engine.playMixedBuffer(samples)
+    }
+
+    func stopTimelinePlayback() { engine?.stop() }
+
+    /// Seconds into the current utterance, or nil when idle - drives the playhead.
+    var playbackPositionSeconds: TimeInterval? { engine?.playbackPosition }
+
+    var isEnginePlaying: Bool { engine?.isSpeaking ?? false }
+
     // MARK: - Orator window settings bridge
 
     var availableVoiceNames: [String] { engine?.voiceNames ?? [] }

@@ -611,6 +611,57 @@ final class OratorEngine: @unchecked Sendable {
         }
     }
 
+    /// Synthesize text to raw PCM, resampled to the ENGINE's format so callers
+    /// can mix results from different providers into one buffer. Blocking - call
+    /// off the main thread. This is what the timeline uses to render clips.
+    func renderSamples(text: String, voiceID: String, speed: Float?) throws -> [Float] {
+        guard let renderProvider = provider(for: voiceID) else {
+            throw OratorError.voiceNotFound(voiceID)
+        }
+        let rate = speed ?? self.speed
+        var out: [Float] = []
+        for chunk in TextChunker.chunk(text) {
+            let samples = try renderProvider.synthesize(
+                text: chunk, voiceID: voiceID, speed: rate
+            ).samples
+            guard !samples.isEmpty else { continue }
+            out += resample(samples, from: renderProvider.sampleRate, to: format.sampleRate)
+        }
+        return out
+    }
+
+    /// The engine's output sample rate - the common rate every timeline clip is
+    /// normalized to before mixing.
+    var outputSampleRate: Double { format.sampleRate }
+
+    /// Play a pre-mixed buffer (the timeline mixdown) through the normal player,
+    /// reusing the engine's generation/cancellation machinery. `synthesisDone` is
+    /// true up front because there is exactly one buffer and no synthesis loop
+    /// following it, so the player going idle is the end of the utterance.
+    @discardableResult
+    func playMixedBuffer(_ samples: [Float]) throws -> Int {
+        guard !samples.isEmpty else { return -1 }
+        lock.lock()
+        generation += 1
+        let gen = generation
+        scheduledBuffers = 0
+        synthesisDone = true
+        speaking = true
+        _paused = false
+        lock.unlock()
+
+        player.stop()
+        if !audioEngine.isRunning {
+            try audioEngine.start()
+            refreshOutputLatency()
+        }
+        player.play()
+        NotificationCenter.default.post(name: .oratorSpeechStarted, object: nil)
+
+        schedule(samples: samples, sampleRate: format.sampleRate, generation: gen)
+        return gen
+    }
+
     // MARK: - Speak / Stop
 
     func speak(_ text: String) throws {
