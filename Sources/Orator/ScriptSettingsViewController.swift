@@ -35,6 +35,8 @@ final class ScriptSettingsViewController: NSViewController,
     private var isRenderingTimeline = false
     private var timelineRenderID: UUID?
     private let buildTimelineButton = NSButton(title: "Build Timeline", target: nil, action: nil)
+    private let openTimelineEditorButton = NSButton(title: "Open Editor", target: nil, action: nil)
+    private var timelineEditorWindowController: TimelineEditorWindowController?
     private let timelineRangePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private var timelineRangeLimit = 0
     private let startTimelineButton = NSButton(title: "<< Start", target: nil, action: nil)
@@ -163,6 +165,8 @@ final class ScriptSettingsViewController: NSViewController,
         timelineHeading.font = .systemFont(ofSize: 15, weight: .semibold)
         buildTimelineButton.target = self
         buildTimelineButton.action = #selector(buildTimeline)
+        openTimelineEditorButton.target = self
+        openTimelineEditorButton.action = #selector(openTimelineEditor)
         let rangeLabel = NSTextField(labelWithString: "Range")
         for (title, tag) in [
             ("Whole script", 0),
@@ -233,6 +237,7 @@ final class ScriptSettingsViewController: NSViewController,
         timelineStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let timelineHeader = NSStackView(views: [
             buildTimelineButton,
+            openTimelineEditorButton,
             rangeLabel,
             timelineRangePopup,
             exportTimelineButton,
@@ -670,8 +675,39 @@ final class ScriptSettingsViewController: NSViewController,
 
         let built = Timeline.fromCast(segments: segments)
         timelineView.timeline = built
+        timelineEditorWindowController?.updateTimeline(built)
         setTimelinePlayhead(0)
         renderTimeline(built, initialBuild: true, description: renderingDescription)
+    }
+
+    @objc private func openTimelineEditor() {
+        if timelineEditorWindowController == nil {
+            timelineEditorWindowController = TimelineEditorWindowController(
+                timeline: timelineView.timeline,
+                envelopeProvider: { [weak self] clip, buckets in
+                    self?.timelineAudio?.envelope(for: clip, buckets: buckets) ?? []
+                },
+                onTimelineChanged: { [weak self] updated in
+                    self?.timelineView.timeline = updated
+                    self?.updateTimelineControls()
+                },
+                onPlay: { [weak self] ms in
+                    self?.playTimeline(fromMS: ms)
+                },
+                onStop: { [weak self] in
+                    self?.stopTimeline()
+                },
+                isPlaying: { [weak self] in
+                    self?.appDelegate.isEnginePlaying ?? false
+                },
+                playheadMS: { [weak self] in
+                    self?.timelineView.playheadMS ?? 0
+                }
+            )
+        }
+        timelineEditorWindowController?.updateTimeline(timelineView.timeline)
+        timelineEditorWindowController?.updatePlayhead(timelineView.playheadMS)
+        timelineEditorWindowController?.show()
     }
 
     private func renderTimeline(
@@ -715,6 +751,7 @@ final class ScriptSettingsViewController: NSViewController,
                 finished.relayoutSequentially()
             }
             self.timelineView.timeline = finished
+            self.timelineEditorWindowController?.updateTimeline(finished)
             self.setTimelinePlayhead(min(self.timelineView.playheadMS, finished.totalDurationMS))
             if initialBuild {
                 self.timelineView.zoomToFit(width: self.timelineScrollView.contentSize.width)
@@ -887,6 +924,7 @@ final class ScriptSettingsViewController: NSViewController,
         buildTimelineButton.isEnabled = true
         timelineRangePopup.isEnabled = !isRenderingTimeline
         exportTimelineButton.isEnabled = transportEnabled
+        openTimelineEditorButton.isEnabled = hasTimeline
         zoomInTimelineButton.isEnabled = transportEnabled
         zoomOutTimelineButton.isEnabled = transportEnabled
         startTimelineButton.isEnabled = markerControlsEnabled
@@ -910,6 +948,7 @@ final class ScriptSettingsViewController: NSViewController,
             max(0, milliseconds),
             max(0, timelineView.timeline.totalDurationMS)
         )
+        timelineEditorWindowController?.updatePlayhead(timelineView.playheadMS)
         updateTimelinePositionLabel()
     }
 
@@ -920,6 +959,7 @@ final class ScriptSettingsViewController: NSViewController,
     }
 
     private func timelineChanged(_ updated: Timeline) {
+        timelineEditorWindowController?.updateTimeline(updated)
         timelineStatus.stringValue = "\(updated.clips.count) clips, \(Self.durationText(updated.totalDurationMS))."
         setTimelinePlayhead(min(timelineView.playheadMS, updated.totalDurationMS))
         updateTimelineControls()
