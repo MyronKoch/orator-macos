@@ -822,6 +822,8 @@ final class OratorEngine: @unchecked Sendable {
                 // Piper 22.05 kHz). schedule() resamples to the engine format so
                 // Piper doesn't play fast/high; timing uses the source rate so
                 // durations stay correct.
+                Self.dumpChunkIfEnabled(synthesis.samples, sampleRate: chunkProvider.sampleRate,
+                                        text: item.text, voiceID: item.voiceID, index: chunkIndex)
                 schedule(samples: synthesis.samples, sampleRate: chunkProvider.sampleRate, generation: gen)
                 offset += emitChunkTiming(
                     synthesis.words, chunkText: item.text, chunkIndex: chunkIndex,
@@ -890,6 +892,29 @@ final class OratorEngine: @unchecked Sendable {
         )
         DispatchQueue.main.async { callback(timing) }
         return duration
+    }
+
+    /// DEV diagnostics: with `defaults write com.myronkoch.orator debugDumpChunks -bool YES`,
+    /// every chunk is written exactly as synthesized to /tmp/orator-chunks/ (a
+    /// WAV plus its text), so playback artifacts can be measured, not guessed.
+    private static func dumpChunkIfEnabled(
+        _ samples: [Float], sampleRate: Double, text: String, voiceID: String, index: Int
+    ) {
+        guard UserDefaults.standard.bool(forKey: "debugDumpChunks") else { return }
+        let dir = URL(fileURLWithPath: "/tmp/orator-chunks")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let stem = String(format: "%@-%03d", ISO8601DateFormatter().string(from: Date()), index)
+        try? "\(voiceID)\n\(text)".write(to: dir.appendingPathComponent(stem + ".txt"), atomically: true, encoding: .utf8)
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))
+        else { return }
+        buffer.frameLength = buffer.frameCapacity
+        samples.withUnsafeBufferPointer { buffer.floatChannelData![0].update(from: $0.baseAddress!, count: samples.count) }
+        // Scoped so the file is closed (and its header finalised) before returning.
+        do {
+            let file = try AVAudioFile(forWriting: dir.appendingPathComponent(stem + ".wav"), settings: format.settings)
+            try file.write(from: buffer)
+        } catch {}
     }
 
     /// Linear-rate convert mono float samples from `srcRate` to `dstRate`.
