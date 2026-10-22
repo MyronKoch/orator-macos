@@ -51,6 +51,9 @@ cp "$MODEL_SRC" "$APP/Contents/Resources/kokoro-v1_0.safetensors"
 if [ -f Resources/Orator.icns ]; then
   cp Resources/Orator.icns "$APP/Contents/Resources/"
 fi
+if [ -f Resources/Credits.html ]; then
+  cp Resources/Credits.html "$APP/Contents/Resources/"
+fi
 for icon in Resources/menubar-idle.png Resources/menubar-speaking.png; do
   [ -f "$icon" ] && cp "$icon" "$APP/Contents/Resources/"
 done
