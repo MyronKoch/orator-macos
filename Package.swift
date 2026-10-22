@@ -25,10 +25,16 @@ let package = Package(
         // and carry no mlx-swift dependency, so the exact 0.30.2 pin is
         // untouched. The wrapper lives in Sources/Orator/SherpaOnnx.swift and
         // imports the `SherpaOnnxC` module vended by the sherpa xcframework.
+        //
+        // sherpa is the one exception to "pulled by URL": scripts/vendor-sherpa.sh
+        // fetches the same checksum-pinned zip and nests its headers under
+        // Headers/SherpaOnnxC/, because PhononCore.xcframework also ships a
+        // top-level Headers/module.modulemap and Xcode copies both into one
+        // include/ directory ("Multiple commands produce ... module.modulemap").
+        // Vendor/ is gitignored; build-app.sh runs the script first.
         .binaryTarget(
             name: "SherpaOnnxMacOS",
-            url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.4/sherpa-onnx-v1.13.4-macos.xcframework.zip",
-            checksum: "4325d8aed99b94be58969005b19f9626f3f3afc4ebd42378b0aad2b84e233552"
+            path: "Vendor/sherpa-onnx.xcframework"
         ),
         .binaryTarget(
             name: "OnnxruntimeMacOS",
@@ -42,11 +48,7 @@ let package = Package(
                 .product(name: "MLXUtilsLibrary", package: "MLXUtilsLibrary"),
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "Sparkle", package: "Sparkle"),
-                // ptts (Phonon) is NOT linked here yet: its PhononCore.xcframework and
-                // the sherpa xcframework both install include/module.modulemap at the
-                // same build-products path ("Multiple commands produce ...
-                // include/module.modulemap"). Resolve that collision when
-                // PhononProvider lands; until then only PhononSmoke links it.
+                .product(name: "ptts", package: "xn-ptts"),
                 "SherpaOnnxMacOS",
                 "OnnxruntimeMacOS",
             ],
