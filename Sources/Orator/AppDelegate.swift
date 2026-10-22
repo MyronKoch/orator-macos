@@ -515,6 +515,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var availableVoiceNames: [String] { engine?.voiceNames ?? [] }
     var availableVoices: [VoiceInfo] { engine?.availableVoices ?? [] }
     func isPhononCharacter(_ voiceID: String) -> Bool { engine?.isPhononCharacter(voiceID) ?? false }
+    /// Cloud voices are a Pro feature: without this Mac's own Cloudflare credentials
+    /// they are listed but locked.
+    var isCloudAvailable: Bool { engine?.isCloudAvailable ?? false }
     var hasNonKokoroVoiceInstalled: Bool {
         (engine?.availableVoices ?? []).contains {
             VoiceInfo.providerID(of: $0.id) != nil

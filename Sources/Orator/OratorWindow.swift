@@ -1163,6 +1163,7 @@ private final class VoicesSettingsViewController: NSViewController {
 
     private func rebuildVoiceMenu() {
         voicePopup.removeAllItems()
+        voicePopup.autoenablesItems = false  // honour isEnabled on headers and locked Pro voices
         let voices = appDelegate.availableVoiceNames
         let groups: [(title: String, prefix: String)] = [
             ("Kokoro · US Female", "af"),
@@ -1279,24 +1280,33 @@ private final class VoicesSettingsViewController: NSViewController {
             ("Aura-1 (cloud · pro)", "cf:aura-1:"),
             ("MeloTTS (cloud · free)", "cf:melotts:"),
         ]
+        // Without this Mac's own credentials they are shown locked, as a Pro
+        // preview: listed, not selectable, and nothing is sent anywhere.
+        let cloudLocked = !appDelegate.isCloudAvailable
+        let cloudPool = cloudLocked ? CloudVoiceCatalog.voiceInfos : appDelegate.availableVoices
         for section in cloudSections {
-            let sectionVoices = appDelegate.availableVoices.filter {
+            let sectionVoices = cloudPool.filter {
                 $0.id.hasPrefix(section.prefix)
             }
             guard !sectionVoices.isEmpty else { continue }
             if !(voicePopup.menu?.items.isEmpty ?? true) {
                 voicePopup.menu?.addItem(.separator())
             }
-            let header = NSMenuItem(title: section.title, action: nil, keyEquivalent: "")
+            let title = cloudLocked ? "\(section.title) · coming soon" : section.title
+            let header = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             header.isEnabled = false
             voicePopup.menu?.addItem(header)
             for voice in sectionVoices {
                 let item = NSMenuItem(
-                    title: appDelegate.displayName(for: voice.id),
+                    title: cloudLocked ? voice.displayName : appDelegate.displayName(for: voice.id),
                     action: nil,
                     keyEquivalent: ""
                 )
-                item.representedObject = voice.id
+                if cloudLocked {
+                    item.isEnabled = false  // no representedObject: a locked voice can't be chosen
+                } else {
+                    item.representedObject = voice.id
+                }
                 voicePopup.menu?.addItem(item)
             }
         }

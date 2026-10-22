@@ -165,34 +165,26 @@ enum CloudTTSError: LocalizedError {
 /// Read from a local JSON file OUTSIDE the git repo:
 ///   ~/Library/Application Support/Orator/cloudflare.json
 ///   { "accountId": "...", "token": "..." }
-/// Falls back to the `CLOUDFLARE_WORKERS_AI_TOKEN` environment variable (useful
-/// when the app is launched from a shell). Returns nil when neither is present,
-/// which cleanly hides all cloud voices. This whole type is throwaway
+/// Returns nil without that file, which locks all cloud voices. This whole type is throwaway
 /// scaffolding: production authenticates to a metered Worker, not Cloudflare.
 struct CloudCredentials {
     let accountID: String
     let token: String
 
-    private static let defaultAccountID = ""
-
+    /// Read ONLY from ~/Library/Application Support/Orator/cloudflare.json, and
+    /// only when it holds both an account ID and a token. Nothing is compiled in
+    /// and there is no environment fallback, so a shipped build has no cloud
+    /// access of its own: without the file, cloud voices show as locked Pro voices.
     static func load() -> CloudCredentials? {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let url = base.appendingPathComponent("Orator/cloudflare.json", isDirectory: false)
-        if let data = try? Data(contentsOf: url),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let token = (json["token"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !token.isEmpty {
-            let account = (json["accountId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            return CloudCredentials(
-                accountID: (account?.isEmpty == false ? account! : defaultAccountID),
-                token: token
-            )
-        }
-        if let envToken = ProcessInfo.processInfo.environment["CLOUDFLARE_WORKERS_AI_TOKEN"],
-           !envToken.isEmpty {
-            return CloudCredentials(accountID: defaultAccountID, token: envToken)
-        }
-        return nil
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = (json["token"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let account = (json["accountId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty, !account.isEmpty
+        else { return nil }
+        return CloudCredentials(accountID: account, token: token)
     }
 }
 
