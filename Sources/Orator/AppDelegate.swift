@@ -215,26 +215,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func loadEngineAsync() {
-        guard let modelPath = Bundle.main.url(forResource: "kokoro-v1_0", withExtension: "safetensors"),
-              let voicesPath = Bundle.main.url(forResource: "voices", withExtension: "npz") else {
+        guard let voicesPath = Bundle.main.url(forResource: "voices", withExtension: "npz") else {
             engineError = "Model files missing from app bundle"
             rebuildMenu()
             return
         }
+        // Kokoro is an optional download now. Older builds bundled it, so a model
+        // inside the app still counts.
+        let kokoroPath = KokoroDownloader.isInstalled
+            ? KokoroDownloader.installedURL
+            : Bundle.main.url(forResource: "kokoro-v1_0", withExtension: "safetensors")
+        let loadKokoro = !defaults.bool(forKey: Pref.kokoroDisabled)
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                let engine = try OratorEngine(modelPath: modelPath, voicesPath: voicesPath)
+                let engine = OratorEngine(kokoroModelPath: kokoroPath, voicesPath: voicesPath, loadKokoro: loadKokoro)
                 engine.warmUp()
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     self.engine = engine
                     self.timeline = SpeechTimeline(engine: engine)
                     engine.currentVoice = self.launchVoice(for: engine)
-                    if self.defaults.bool(forKey: Pref.kokoroDisabled),
-                       self.hasNonKokoroVoiceInstalled {
-                        self.setKokoroDisabled(true)
-                    }
                     let savedSpeed = self.defaults.float(forKey: Pref.speed)
                     engine.speed = savedSpeed > 0 ? savedSpeed : 1.0
                     self.continuousReading = self.defaults.object(forKey: Pref.continuousReading) == nil
@@ -632,6 +633,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             engine?.setKokoroEnabled(true)
         }
         defaults.set(disabled, forKey: Pref.kokoroDisabled)
+        rebuildMenu()
+        oratorWindowController?.refresh()
+    }
+
+    var isKokoroInstalled: Bool { engine?.isKokoroInstalled ?? false }
+
+    /// Download the optional Kokoro voices, then load them (unless the user
+    /// has Kokoro switched off).
+    func downloadKokoro(progress: @escaping @MainActor @Sendable (Double) -> Void) async throws {
+        let url = try await KokoroDownloader.download(progress: progress)
+        engine?.installKokoro(modelPath: url, load: !defaults.bool(forKey: Pref.kokoroDisabled))
+        rebuildMenu()
+        oratorWindowController?.refresh()
+    }
+
+    /// Delete the downloaded Kokoro model. A selected Kokoro voice keeps working:
+    /// it plays as its Phonon equivalent.
+    func removeKokoro() throws {
+        engine?.uninstallKokoro()
+        try KokoroDownloader.remove()
         rebuildMenu()
         oratorWindowController?.refresh()
     }

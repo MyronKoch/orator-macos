@@ -1375,6 +1375,10 @@ private final class GeneralSettingsViewController: NSViewController {
     private let kokoroCheckbox = NSButton(
         checkboxWithTitle: "Disable Kokoro (frees ~380 MB RAM)", target: nil, action: nil
     )
+    // Kokoro is an optional download (Phonon is the default voice engine).
+    private let kokoroButton = NSButton(title: "Download Kokoro voices (312 MB)", target: nil, action: nil)
+    private let kokoroStatus = NSTextField(labelWithString: "")
+    private var kokoroDownload: Task<Void, Never>?
     private let historyStack = NSStackView()
     private var historyTexts: [String] = []
 
@@ -1410,6 +1414,13 @@ private final class GeneralSettingsViewController: NSViewController {
         content.addArrangedSubview(rememberCheckbox)
         content.addArrangedSubview(continuousCheckbox)
         content.addArrangedSubview(kokoroCheckbox)
+        kokoroButton.target = self
+        kokoroButton.action = #selector(kokoroButtonPressed)
+        kokoroStatus.font = .systemFont(ofSize: 11)
+        kokoroStatus.textColor = .secondaryLabelColor
+        let kokoroRow = NSStackView(views: [kokoroButton, kokoroStatus])
+        kokoroRow.spacing = 10
+        content.addArrangedSubview(kokoroRow)
 
         let rememberHelp = NSTextField(
             wrappingLabelWithString: "Reading history and Dashboard stats are stored locally only when “Remember my reading” is on."
@@ -1483,6 +1494,13 @@ private final class GeneralSettingsViewController: NSViewController {
         kokoroCheckbox.toolTip = needsAlternativeVoice
             ? "Download a Piper or Kitten voice first"
             : nil
+        kokoroCheckbox.isHidden = !appDelegate.isKokoroInstalled
+        if kokoroDownload == nil {
+            kokoroButton.title = appDelegate.isKokoroInstalled
+                ? "Remove Kokoro voices" : "Download Kokoro voices (312 MB)"
+            kokoroStatus.stringValue = appDelegate.isKokoroInstalled
+                ? "" : "The older Kokoro engine. Optional: Phonon is the default."
+        }
         rebuildHistory()
     }
 
@@ -1529,6 +1547,37 @@ private final class GeneralSettingsViewController: NSViewController {
     @objc private func toggleContinuousReading(_ sender: NSButton) {
         appDelegate.setContinuousReading(sender.state == .on)
         refresh()
+    }
+
+    @objc private func kokoroButtonPressed() {
+        if let download = kokoroDownload {
+            download.cancel()
+            return
+        }
+        if appDelegate.isKokoroInstalled {
+            do { try appDelegate.removeKokoro() } catch {
+                kokoroStatus.stringValue = "Could not remove Kokoro: \(error.localizedDescription)"
+            }
+            refresh()
+            return
+        }
+        kokoroButton.title = "Cancel"
+        kokoroStatus.stringValue = "Downloading… 0%"
+        kokoroDownload = Task { @MainActor [weak self] in
+            do {
+                try await self?.appDelegate.downloadKokoro { fraction in
+                    self?.kokoroStatus.stringValue = "Downloading… \(Int(fraction * 100))%"
+                }
+                self?.kokoroDownload = nil
+                self?.refresh()
+            } catch {
+                self?.kokoroDownload = nil
+                self?.refresh()
+                if !(error is CancellationError), (error as? URLError)?.code != .cancelled {
+                    self?.kokoroStatus.stringValue = error.localizedDescription
+                }
+            }
+        }
     }
 
     @objc private func toggleKokoro(_ sender: NSButton) {
