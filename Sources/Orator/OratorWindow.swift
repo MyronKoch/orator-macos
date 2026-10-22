@@ -1213,6 +1213,25 @@ private final class VoicesSettingsViewController: NSViewController {
             }
         }
 
+        // Local TTS servers on this Mac (Phonon, Pocket), listed first among the
+        // extras because they are the best-sounding on-device voices.
+        for server in appDelegate.localTTSServers {
+            let prefix = "local:\(server.id):"
+            let sectionVoices = appDelegate.availableVoices.filter { $0.id.hasPrefix(prefix) }
+            guard !sectionVoices.isEmpty else { continue }
+            if !(voicePopup.menu?.items.isEmpty ?? true) {
+                voicePopup.menu?.addItem(.separator())
+            }
+            let header = NSMenuItem(title: "\(server.name) (local)", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            voicePopup.menu?.addItem(header)
+            for voice in sectionVoices {
+                let item = NSMenuItem(title: appDelegate.displayName(for: voice.id), action: nil, keyEquivalent: "")
+                item.representedObject = voice.id
+                voicePopup.menu?.addItem(item)
+            }
+        }
+
         // Cloud (Cloudflare Workers AI) voices, grouped by model. These send text
         // off the Mac - the picker labels them; a one-time warning gates first use.
         let cloudSections: [(title: String, prefix: String)] = [

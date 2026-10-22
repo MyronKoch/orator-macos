@@ -113,6 +113,9 @@ final class OratorEngine: @unchecked Sendable {
     /// cloud call is METERED from day one through `cloudMeter`.
     let cloudMeter = CloudUsageMeter()
     private let cloud: CloudTTSProvider?
+    /// OpenAI-compatible TTS servers on this Mac (Phonon, Pocket). Loopback only,
+    /// so this stays on-device. Nil when none are running.
+    private let local: LocalTTSProvider?
 
     /// VoiceInfos a catalog model declares, without loading it.
     private func catalogVoiceInfos(for model: CatalogModel) -> [VoiceInfo] {
@@ -170,6 +173,9 @@ final class OratorEngine: @unchecked Sendable {
         if VoiceInfo.providerID(of: voiceID) == "cf" {
             return cloud
         }
+        if VoiceInfo.providerID(of: voiceID) == "local" {
+            return local
+        }
         if let model = VoiceCatalog.model(forVoiceID: voiceID),
            isInstalled(model),
            let provider = loadedProvider(for: model) {
@@ -210,11 +216,17 @@ final class OratorEngine: @unchecked Sendable {
             .flatMap { catalogVoiceInfos(for: $0) }
         // Cloud voices need no install - always listed when credentials exist.
         let cloudVoices = cloud?.voices() ?? []
-        return (kokoroProvider()?.voices() ?? []) + catalogVoices + cloudVoices
+        let localVoices = local?.voices() ?? []
+        return (kokoroProvider()?.voices() ?? []) + localVoices + catalogVoices + cloudVoices
     }
 
     /// Whether cloud (Cloudflare) voices are configured and selectable.
     var isCloudAvailable: Bool { cloud != nil }
+
+    /// Local servers that answered at launch, for the picker's section headers.
+    var localServers: [(id: String, name: String)] {
+        local?.servers.map { ($0.id, $0.name) } ?? []
+    }
 
     /// Kitten (sherpa-onnx) voices only, or empty when that engine isn't loaded.
     /// Their ids are namespaced (`kitten:0`...); Kokoro voices stay bare names in
@@ -240,6 +252,9 @@ final class OratorEngine: @unchecked Sendable {
     func canSpeak(voiceID: String) -> Bool {
         if VoiceInfo.providerID(of: voiceID) == "cf" {
             return cloud?.canSpeak(voiceID: voiceID) ?? false
+        }
+        if VoiceInfo.providerID(of: voiceID) == "local" {
+            return local?.canSpeak(voiceID: voiceID) ?? false
         }
         if let model = VoiceCatalog.model(forVoiceID: voiceID) {
             return isInstalled(model)
@@ -372,6 +387,7 @@ final class OratorEngine: @unchecked Sendable {
         // Sherpa models are NOT eager-loaded; they load lazily on first use.
         // Cloud provider is nil unless credentials are configured (DEV only).
         cloud = CloudTTSProvider(meter: cloudMeter)
+        local = LocalTTSProvider()
 
         format = AVAudioFormat(
             standardFormatWithSampleRate: loadedKokoro.sampleRate,
