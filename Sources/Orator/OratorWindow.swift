@@ -808,6 +808,8 @@ private final class VoicesSettingsViewController: NSViewController {
     private unowned let appDelegate: AppDelegate
     private let voicePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let speedPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let cloneVoiceButton = NSButton(title: "Clone a Voice...", target: nil, action: nil)
+    private var voiceCloneController: VoiceCloneWindowController?
     private var catalogRows: [CatalogModelRowView] = []
     private let autoCastCheckbox = NSButton(
         checkboxWithTitle: "Dramatize dialogue", target: nil, action: nil
@@ -929,12 +931,17 @@ private final class VoicesSettingsViewController: NSViewController {
         libraryHeading.font = .systemFont(ofSize: 15, weight: .semibold)
         let voiceLibrary = makeVoiceLibrary()
 
+        cloneVoiceButton.bezelStyle = .rounded
+        cloneVoiceButton.target = self
+        cloneVoiceButton.action = #selector(cloneVoice)
+
         stack.addArrangedSubview(heading)
         stack.addArrangedSubview(helper)
         stack.setCustomSpacing(20, after: helper)
         stack.addArrangedSubview(autoCastControls)
         autoCastHelp.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         stack.addArrangedSubview(globalBox)
+        stack.addArrangedSubview(cloneVoiceButton)
         stack.setCustomSpacing(20, after: globalBox)
         stack.addArrangedSubview(libraryHeading)
         stack.addArrangedSubview(voiceLibrary)
@@ -1110,6 +1117,7 @@ private final class VoicesSettingsViewController: NSViewController {
 
     func refresh() {
         guard isViewLoaded else { return }
+        cloneVoiceButton.isHidden = appDelegate.pocketServerURL == nil
         rebuildVoiceMenu()
         rebuildSpeedMenu()
         for row in catalogRows {
@@ -1117,6 +1125,18 @@ private final class VoicesSettingsViewController: NSViewController {
         }
         syncAutoCastState()
         appDelegate.refreshAppVoiceProfilesEditor()
+    }
+
+    @objc private func cloneVoice() {
+        guard let window = view.window, window.attachedSheet == nil,
+              voiceCloneController == nil, appDelegate.pocketServerURL != nil else { return }
+        let controller = VoiceCloneWindowController(appDelegate: appDelegate)
+        // Retain the controller through dismissal so its recorder and take outlive this handler.
+        voiceCloneController = controller
+        controller.beginSheet(on: window) { [weak self] in
+            self?.voiceCloneController = nil
+            self?.refresh()
+        }
     }
 
     private func syncAutoCastState() {
