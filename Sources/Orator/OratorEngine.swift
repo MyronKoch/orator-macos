@@ -223,6 +223,12 @@ final class OratorEngine: @unchecked Sendable {
     /// Whether cloud (Cloudflare) voices are configured and selectable.
     var isCloudAvailable: Bool { cloud != nil }
 
+    /// Re-read local server voice lists (after a clone is created or deleted).
+    func refreshLocalVoices() { local?.refresh() }
+
+    /// Base URL of a local server ("pocket"), nil when it is not running.
+    func localServerURL(_ id: String) -> URL? { local?.baseURL(forServer: id) }
+
     /// Local servers that answered at launch, for the picker's section headers.
     var localServers: [(id: String, name: String)] {
         local?.servers.map { ($0.id, $0.name) } ?? []
