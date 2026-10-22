@@ -1,5 +1,5 @@
 {
-  "originHash" : "b6ac12fc14b75612dcc01ba856c8cbe0247182bf60ac1a69c4b1925ddf58c2cf",
+  "originHash" : "4fa82559e6f254d5b38ab8b793546572c87dfcad55886781ef9b2ad002376ebe",
   "pins" : [
     {
       "identity" : "kokoro-ios",
@@ -53,6 +53,15 @@
       "state" : {
         "revision" : "0c0290ff6b24942dadb83a929ffaaa1481df04a2",
         "version" : "1.1.1"
+      }
+    },
+    {
+      "identity" : "xn-ptts",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/gradium-ai/xn-ptts.git",
+      "state" : {
+        "revision" : "f07d7952db0c6127d5e4bc3f41c82b3304b6b5aa",
+        "version" : "0.4.0"
       }
     },
     {
