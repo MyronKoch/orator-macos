@@ -488,6 +488,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Orator window settings bridge
 
     var localTTSServers: [(id: String, name: String)] { engine?.localServers ?? [] }
+    /// Pocket's base URL when it is running - the clone sheet posts here.
+    var pocketServerURL: URL? { engine?.localServerURL("pocket") }
+    /// Pull new voice lists from the local servers and rebuild the voice menus.
+    func refreshLocalVoices() {
+        engine?.refreshLocalVoices()
+        rebuildMenu()
+        oratorWindowController?.refresh()
+    }
     var availableVoiceNames: [String] { engine?.voiceNames ?? [] }
     var availableVoices: [VoiceInfo] { engine?.availableVoices ?? [] }
     var hasNonKokoroVoiceInstalled: Bool {

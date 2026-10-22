@@ -24,7 +24,15 @@ final class LocalTTSProvider: TTSProvider, @unchecked Sendable {
         let voices: [String]
     }
 
-    let servers: [Server]
+    /// Mutable because a voice cloned while the app runs must appear without a
+    /// relaunch. Read on the synth queue, written from main via refresh(), so it
+    /// sits behind a lock.
+    private var storedServers: [Server]
+    private let serversLock = NSLock()
+    var servers: [Server] {
+        serversLock.lock(); defer { serversLock.unlock() }
+        return storedServers
+    }
     private let session: URLSession
 
     /// Returns nil when no configured server is reachable, so the picker simply
@@ -35,15 +43,33 @@ final class LocalTTSProvider: TTSProvider, @unchecked Sendable {
         config.timeoutIntervalForResource = 120
         session = URLSession(configuration: config)
 
-        let reachable = LocalTTSConfig.load().compactMap { entry -> Server? in
-            guard Self.isLoopback(entry.url),
-                  let voices = Self.fetchVoices(entry.url), !voices.isEmpty
+        let reachable = Self.discover()
+        guard !reachable.isEmpty else { return nil }
+        storedServers = reachable
+        oratorLog("local TTS: \(reachable.map { "\($0.name) (\($0.voices.count))" }.joined(separator: ", "))")
+    }
+
+    private static func discover() -> [Server] {
+        LocalTTSConfig.load().compactMap { entry -> Server? in
+            guard isLoopback(entry.url),
+                  let voices = fetchVoices(entry.url), !voices.isEmpty
             else { return nil }
             return Server(id: entry.id, name: entry.name, baseURL: entry.url, voices: voices)
         }
-        guard !reachable.isEmpty else { return nil }
-        servers = reachable
-        oratorLog("local TTS: \(reachable.map { "\($0.name) (\($0.voices.count))" }.joined(separator: ", "))")
+    }
+
+    /// Re-read every server's voice list, e.g. after cloning a new voice. Keeps
+    /// the previous list if nothing answers, so a momentary outage does not
+    /// wipe the picker.
+    func refresh() {
+        let fresh = Self.discover()
+        guard !fresh.isEmpty else { return }
+        serversLock.lock(); storedServers = fresh; serversLock.unlock()
+    }
+
+    /// Base URL of a server by id ("pocket"), for clone/delete calls.
+    func baseURL(forServer id: String) -> URL? {
+        servers.first { $0.id == id }?.baseURL
     }
 
     func voices() -> [VoiceInfo] {
