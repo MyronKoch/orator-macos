@@ -14,6 +14,9 @@ let package = Package(
         // framework, no mlx-swift dependency, so it resolves cleanly alongside
         // KokoroSwift's exact 0.30.2 pin.
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
+        // Phonon TTS (Gradium, Apache-2.0). No SwiftPM dependencies of its own - a prebuilt
+        // binary core plus Apple frameworks - so it cannot disturb the exact mlx-swift pin.
+        .package(url: "https://github.com/gradium-ai/xn-ptts.git", exact: "0.4.0"),
     ],
     targets: [
         // sherpa-onnx ONNX voice engine, delivered as prebuilt STATIC
@@ -39,6 +42,7 @@ let package = Package(
                 .product(name: "MLXUtilsLibrary", package: "MLXUtilsLibrary"),
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "Sparkle", package: "Sparkle"),
+                .product(name: "ptts", package: "xn-ptts"),
                 "SherpaOnnxMacOS",
                 "OnnxruntimeMacOS",
             ],
@@ -46,6 +50,12 @@ let package = Package(
                 // sherpa-onnx / onnxruntime are C++; link the C++ runtime.
                 .linkedLibrary("c++"),
             ]
+        ),
+        // SPIKE (temporary): load Phonon and write a WAV, to prove it runs beside MLX
+        // before it becomes Orator's default engine. Delete once PhononProvider lands.
+        .executableTarget(
+            name: "PhononSmoke",
+            dependencies: [.product(name: "ptts", package: "xn-ptts")]
         ),
     ]
 )
