@@ -18,7 +18,7 @@ MODEL_SRC=$(find ~/.cache/huggingface/hub/models--prince-canuma--Kokoro-82M/snap
 [ -n "$MODEL_SRC" ] || { echo "ERROR: kokoro-v1_0.safetensors not found in HuggingFace cache"; exit 1; }
 
 echo "==> Building (xcodebuild, Release)…"
-xcodebuild -scheme Orator -configuration Release \
+xcodebuild -jobs 6 -scheme Orator -configuration Release \
   -destination 'platform=macOS' -derivedDataPath .build/xcode build -quiet
 
 PRODUCTS=".build/xcode/Build/Products/Release"
