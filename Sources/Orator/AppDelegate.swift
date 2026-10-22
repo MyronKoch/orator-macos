@@ -57,6 +57,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         static let speed = "speed"
         static let autoCast = "autoCast"
         static let kokoroDisabled = "kokoroDisabled"
+        // Set once a saved Kokoro voice has been moved to its Phonon equivalent.
+        static let phononMigrated = "phononMigrated"
         // Set once the user has opted into cloud voices (which send text off the
         // Mac). Gates the first cloud-voice selection with a loud warning.
         static let cloudEgressAcknowledged = "cloudEgressAcknowledged"
@@ -198,6 +200,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Engine
 
+    /// The saved global voice, or the engine's default. The first time Phonon is
+    /// present, a saved Kokoro voice moves to its Phonon equivalent (Phonon
+    /// replaced Kokoro as the default on 2026-10-21); after that the choice is
+    /// left alone, so picking a Kokoro voice again sticks.
+    private func launchVoice(for engine: OratorEngine) -> String {
+        guard let saved = defaults.string(forKey: Pref.voice) else { return engine.defaultVoice }
+        guard engine.isPhononAvailable, !defaults.bool(forKey: Pref.phononMigrated) else { return saved }
+        defaults.set(true, forKey: Pref.phononMigrated)
+        guard let mapped = PhononProvider.voiceID(forKokoro: saved) else { return saved }
+        defaults.set(mapped, forKey: Pref.voice)
+        oratorLog("voice: migrated \(saved) -> \(mapped)")
+        return mapped
+    }
+
     private func loadEngineAsync() {
         guard let modelPath = Bundle.main.url(forResource: "kokoro-v1_0", withExtension: "safetensors"),
               let voicesPath = Bundle.main.url(forResource: "voices", withExtension: "npz") else {
@@ -214,7 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     guard let self = self else { return }
                     self.engine = engine
                     self.timeline = SpeechTimeline(engine: engine)
-                    engine.currentVoice = self.defaults.string(forKey: Pref.voice) ?? "af_heart"
+                    engine.currentVoice = self.launchVoice(for: engine)
                     if self.defaults.bool(forKey: Pref.kokoroDisabled),
                        self.hasNonKokoroVoiceInstalled {
                         self.setKokoroDisabled(true)
@@ -398,7 +414,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             oratorLog("capture: got \(text.count) chars — speaking")
 
-            let globalVoice = self.defaults.string(forKey: Pref.voice) ?? "af_heart"
+            let globalVoice = self.defaults.string(forKey: Pref.voice) ?? engine.defaultVoice
             let savedSpeed = self.defaults.float(forKey: Pref.speed)
             let globalSpeed = savedSpeed == 0 ? Float(1.0) : savedSpeed
             if let bundleID = readApp?.bundleID,
@@ -498,6 +514,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     var availableVoiceNames: [String] { engine?.voiceNames ?? [] }
     var availableVoices: [VoiceInfo] { engine?.availableVoices ?? [] }
+    func isPhononCharacter(_ voiceID: String) -> Bool { engine?.isPhononCharacter(voiceID) ?? false }
     var hasNonKokoroVoiceInstalled: Bool {
         (engine?.availableVoices ?? []).contains {
             VoiceInfo.providerID(of: $0.id) != nil

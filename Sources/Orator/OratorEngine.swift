@@ -116,6 +116,9 @@ final class OratorEngine: @unchecked Sendable {
     /// OpenAI-compatible TTS servers on this Mac (Phonon, Pocket). Loopback only,
     /// so this stays on-device. Nil when none are running.
     private let local: LocalTTSProvider?
+    /// Phonon, the bundled default engine. Nil only when the app was built
+    /// without its model, which leaves Kokoro as the default.
+    private let phonon: PhononProvider?
 
     /// VoiceInfos a catalog model declares, without loading it.
     private func catalogVoiceInfos(for model: CatalogModel) -> [VoiceInfo] {
@@ -170,6 +173,9 @@ final class OratorEngine: @unchecked Sendable {
     /// a background/synth thread: it may block loading the model. UI validation
     /// uses `canSpeak(voiceID:)` instead, which never loads.
     private func provider(for voiceID: String) -> TTSProvider? {
+        if VoiceInfo.providerID(of: voiceID) == "phonon" {
+            return phonon
+        }
         if VoiceInfo.providerID(of: voiceID) == "cf" {
             return cloud
         }
@@ -201,7 +207,7 @@ final class OratorEngine: @unchecked Sendable {
 
     // MARK: - Settings (persisted by the app layer)
 
-    var currentVoice: String = "af_heart"
+    var currentVoice: String = "af_heart"  // replaced with `defaultVoice` or the saved pref at launch
     var speed: Float = 1.0
 
     var voiceNames: [String] { kokoroProvider()?.localVoiceNames ?? [] }
@@ -217,8 +223,21 @@ final class OratorEngine: @unchecked Sendable {
         // Cloud voices need no install - always listed when credentials exist.
         let cloudVoices = cloud?.voices() ?? []
         let localVoices = local?.voices() ?? []
-        return (kokoroProvider()?.voices() ?? []) + localVoices + catalogVoices + cloudVoices
+        let phononVoices = phonon?.voices() ?? []
+        return phononVoices + (kokoroProvider()?.voices() ?? []) + localVoices + catalogVoices + cloudVoices
     }
+
+    /// The voice used when the user has not picked one: Phonon's Harper when the
+    /// model shipped, else Kokoro's af_heart (the voice Harper stands in for).
+    var defaultVoice: String {
+        phonon == nil ? "af_heart" : VoiceInfo.namespaced(provider: "phonon", local: PhononProvider.defaultVoice)
+    }
+
+    /// Whether Phonon is bundled (its voices list before the model finishes loading).
+    var isPhononAvailable: Bool { phonon != nil }
+
+    /// Phonon's character voices (Snow Queen, Ogre...), split out for the picker.
+    func isPhononCharacter(_ voiceID: String) -> Bool { phonon?.isCharacter(voiceID) ?? false }
 
     /// Whether cloud (Cloudflare) voices are configured and selectable.
     var isCloudAvailable: Bool { cloud != nil }
@@ -256,6 +275,9 @@ final class OratorEngine: @unchecked Sendable {
     /// namespaced id like `kitten:0`). Catalog/disk-based, so it never triggers a
     /// model load - safe to call from the UI to validate a selection.
     func canSpeak(voiceID: String) -> Bool {
+        if VoiceInfo.providerID(of: voiceID) == "phonon" {
+            return phonon?.canSpeak(voiceID: voiceID) ?? false
+        }
         if VoiceInfo.providerID(of: voiceID) == "cf" {
             return cloud?.canSpeak(voiceID: voiceID) ?? false
         }
@@ -394,6 +416,7 @@ final class OratorEngine: @unchecked Sendable {
         // Cloud provider is nil unless credentials are configured (DEV only).
         cloud = CloudTTSProvider(meter: cloudMeter)
         local = LocalTTSProvider()
+        phonon = PhononProvider.makeIfAvailable()
 
         format = AVAudioFormat(
             standardFormatWithSampleRate: loadedKokoro.sampleRate,

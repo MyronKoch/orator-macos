@@ -1165,16 +1165,36 @@ private final class VoicesSettingsViewController: NSViewController {
         voicePopup.removeAllItems()
         let voices = appDelegate.availableVoiceNames
         let groups: [(title: String, prefix: String)] = [
-            ("US · Female", "af"),
-            ("US · Male", "am"),
-            ("UK · Female", "bf"),
-            ("UK · Male", "bm"),
+            ("Kokoro · US Female", "af"),
+            ("Kokoro · US Male", "am"),
+            ("Kokoro · UK Female", "bf"),
+            ("Kokoro · UK Male", "bm"),
         ]
 
-        for (groupIndex, group) in groups.enumerated() {
+        // Phonon, the default engine, first: narrators, then character voices.
+        let phononVoices = appDelegate.availableVoices.filter { $0.provider == "phonon" }
+        let phononSections: [(title: String, voices: [VoiceInfo])] = [
+            ("Phonon", phononVoices.filter { !appDelegate.isPhononCharacter($0.id) }),
+            ("Phonon · Characters", phononVoices.filter { appDelegate.isPhononCharacter($0.id) }),
+        ]
+        for section in phononSections where !section.voices.isEmpty {
+            if !(voicePopup.menu?.items.isEmpty ?? true) {
+                voicePopup.menu?.addItem(.separator())
+            }
+            let header = NSMenuItem(title: section.title, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            voicePopup.menu?.addItem(header)
+            for voice in section.voices {
+                let item = NSMenuItem(title: voice.displayName, action: nil, keyEquivalent: "")
+                item.representedObject = voice.id
+                voicePopup.menu?.addItem(item)
+            }
+        }
+
+        for group in groups {
             let matching = voices.filter { $0.hasPrefix(group.prefix + "_") }
             guard !matching.isEmpty else { continue }
-            if groupIndex > 0, !(voicePopup.menu?.items.isEmpty ?? true) {
+            if !(voicePopup.menu?.items.isEmpty ?? true) {
                 voicePopup.menu?.addItem(.separator())
             }
             let header = NSMenuItem(title: group.title, action: nil, keyEquivalent: "")
