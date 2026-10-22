@@ -151,10 +151,26 @@ final class PhononProvider: TTSProvider, @unchecked Sendable {
         if tts.voice != name {
             try Self.blocking { try await tts.setVoice(name) }
         }
-        let samples = try Self.blocking { try await tts.synthesize(text) }
+        var samples = try Self.blocking { try await tts.synthesize(text) }
+        Self.fadeIn(&samples)
         // Phonon has no speed control, so speed is applied afterwards as a
         // pitch-preserving tempo change.
         return TTSSynthesis(samples: TimeStretch.apply(samples, rate: speed, sampleRate: sampleRate), words: nil)
+    }
+
+    /// Every Phonon utterance opens with the same decoder transient: a ~-40 dBFS
+    /// burst in the first millisecond, gone by ~5 ms, before any speech (measured
+    /// 2026-10-22, identical across sentences and voices). Orator synthesizes one
+    /// sentence per call, so unfaded it pops before every sentence. A 10 ms
+    /// raised-cosine fade-in removes it; speech starts later than that.
+    static let fadeInFrames = 240
+
+    static func fadeIn(_ samples: inout [Float]) {
+        let count = min(fadeInFrames, samples.count)
+        for index in 0..<count {
+            let gain = 0.5 - 0.5 * cos(Float.pi * Float(index) / Float(fadeInFrames))
+            samples[index] *= gain
+        }
     }
 
     /// Run Phonon's async API to completion from the (synchronous) synth queue.
