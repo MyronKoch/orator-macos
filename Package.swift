@@ -42,7 +42,11 @@ let package = Package(
                 .product(name: "MLXUtilsLibrary", package: "MLXUtilsLibrary"),
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "Sparkle", package: "Sparkle"),
-                .product(name: "ptts", package: "xn-ptts"),
+                // ptts (Phonon) is NOT linked here yet: its PhononCore.xcframework and
+                // the sherpa xcframework both install include/module.modulemap at the
+                // same build-products path ("Multiple commands produce ...
+                // include/module.modulemap"). Resolve that collision when
+                // PhononProvider lands; until then only PhononSmoke links it.
                 "SherpaOnnxMacOS",
                 "OnnxruntimeMacOS",
             ],
