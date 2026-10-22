@@ -63,11 +63,11 @@ final class OratorEngine: @unchecked Sendable {
     /// The synthesis source. Everything below this line is engine-agnostic:
     /// the provider supplies PCM, this class still owns scheduling and the
     /// generation/lock/scheduledBuffers/synthesisDone/speaking state machine.
-    /// The bundled default engine. Nullable so it can be UNLOADED to reclaim
-    /// its ~380 MB for users who live entirely in Piper/Kitten. Guarded by
-    /// `providerLock`. The model paths are kept so it can be reloaded.
+    /// Kokoro, now an optional download (Phonon is the default). Nullable so it
+    /// can be absent, or UNLOADED to reclaim its ~380 MB. Guarded by
+    /// `providerLock`, as is the model path, which is nil until it is installed.
     private var kokoro: KokoroProvider?
-    private let kokoroModelPath: URL
+    private var kokoroModelPath: URL?
     private let kokoroVoicesPath: URL
 
     /// Thread-safe read of the optional Kokoro provider.
@@ -84,9 +84,10 @@ final class OratorEngine: @unchecked Sendable {
     /// must ensure the current voice isn't a Kokoro voice before disabling.
     func setKokoroEnabled(_ enabled: Bool) {
         if enabled {
-            guard kokoroProvider() == nil,
+            providerLock.lock(); let modelPath = kokoroModelPath; providerLock.unlock()
+            guard kokoroProvider() == nil, let modelPath,
                   let loaded = try? KokoroProvider(
-                      modelPath: kokoroModelPath, voicesPath: kokoroVoicesPath
+                      modelPath: modelPath, voicesPath: kokoroVoicesPath
                   ) else { return }
             providerLock.lock(); kokoro = loaded; providerLock.unlock()
             oratorLog("kokoro: enabled (reloaded)")
@@ -96,6 +97,35 @@ final class OratorEngine: @unchecked Sendable {
             KokoroProvider.releaseCachedMemory()
             oratorLog("kokoro: disabled (released ~380 MB)")
         }
+    }
+
+    /// Whether the Kokoro model is on this Mac (downloaded), loaded or not.
+    var isKokoroInstalled: Bool {
+        providerLock.lock(); defer { providerLock.unlock() }
+        return kokoroModelPath != nil
+    }
+
+    /// Adopt a freshly downloaded Kokoro model, loading it when `load` is true.
+    func installKokoro(modelPath: URL, load: Bool) {
+        providerLock.lock(); kokoroModelPath = modelPath; providerLock.unlock()
+        if load { setKokoroEnabled(true) }
+    }
+
+    /// Forget the Kokoro model (after its file is removed) and unload it.
+    func uninstallKokoro() {
+        setKokoroEnabled(false)
+        providerLock.lock(); kokoroModelPath = nil; providerLock.unlock()
+    }
+
+    /// The voice that actually speaks `voiceID`. Kokoro names are bare
+    /// (`af_heart`) and live on in saved prefs, app profiles, script casts and the
+    /// auto-casters' pool; when Kokoro is not loaded they play as their Phonon
+    /// equivalent instead of falling silent.
+    private func effectiveVoiceID(_ voiceID: String) -> String {
+        guard VoiceInfo.providerID(of: voiceID) == nil, kokoroProvider() == nil, phonon != nil,
+              let mapped = PhononProvider.voiceID(forKokoro: voiceID)
+        else { return voiceID }
+        return mapped
     }
     /// Downloadable sherpa-onnx models keyed by their catalog archive name.
     /// Sherpa models are loaded LAZILY (only when a voice is actually spoken)
@@ -210,7 +240,16 @@ final class OratorEngine: @unchecked Sendable {
     var currentVoice: String = "af_heart"  // replaced with `defaultVoice` or the saved pref at launch
     var speed: Float = 1.0
 
-    var voiceNames: [String] { kokoroProvider()?.localVoiceNames ?? [] }
+    /// Kokoro-style names (`af_heart`...) the auto-casters and app profiles pick
+    /// from. Without Kokoro, the names that have a Phonon narrator equivalent,
+    /// so casting keeps working (they play through `effectiveVoiceID`).
+    var voiceNames: [String] {
+        if let names = kokoroProvider()?.localVoiceNames { return names }
+        guard phonon != nil else { return [] }
+        return PhononProvider.kokoroEquivalent
+            .filter { !PhononProvider.characterVoices.contains($0.value) }
+            .map(\.key).sorted()
+    }
 
     /// Every voice across all installed providers, namespaced and in catalog
     /// order after the bundled Kokoro voices.
@@ -287,7 +326,8 @@ final class OratorEngine: @unchecked Sendable {
         if let model = VoiceCatalog.model(forVoiceID: voiceID) {
             return isInstalled(model)
         }
-        return kokoroProvider()?.canSpeak(voiceID: voiceID) ?? false
+        if let kokoro = kokoroProvider() { return kokoro.canSpeak(voiceID: voiceID) }
+        return effectiveVoiceID(voiceID) != voiceID
     }
 
     /// Compatibility alias for callers that predate the full voice catalog.
@@ -407,21 +447,22 @@ final class OratorEngine: @unchecked Sendable {
 
     // MARK: - Init
 
-    init(modelPath: URL, voicesPath: URL) throws {
+    /// `kokoroModelPath` is nil when Kokoro has not been downloaded; Phonon is the
+    /// default either way. `loadKokoro` false keeps an installed Kokoro unloaded.
+    init(kokoroModelPath modelPath: URL?, voicesPath: URL, loadKokoro: Bool) {
         kokoroModelPath = modelPath
         kokoroVoicesPath = voicesPath
-        let loadedKokoro = try KokoroProvider(modelPath: modelPath, voicesPath: voicesPath)
-        kokoro = loadedKokoro
+        if loadKokoro, let modelPath {
+            kokoro = try? KokoroProvider(modelPath: modelPath, voicesPath: voicesPath)
+        }
         // Sherpa models are NOT eager-loaded; they load lazily on first use.
         // Cloud provider is nil unless credentials are configured (DEV only).
         cloud = CloudTTSProvider(meter: cloudMeter)
         local = LocalTTSProvider()
         phonon = PhononProvider.makeIfAvailable()
 
-        format = AVAudioFormat(
-            standardFormatWithSampleRate: loadedKokoro.sampleRate,
-            channels: 1
-        )!
+        // 24 kHz: Phonon, Kokoro, Kitten and Pocket all emit it; others resample.
+        format = AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1)!
         audioEngine.attach(player)
         audioEngine.connect(player, to: audioEngine.mainMixerNode, format: format)
         installOutputLatencyObservers()
@@ -598,7 +639,7 @@ final class OratorEngine: @unchecked Sendable {
         completion: @escaping @Sendable (Result<URL, Error>) -> Void
     ) {
         let chunks = TextChunker.chunk(text)
-        let voiceKey = voiceName ?? currentVoice
+        let voiceKey = effectiveVoiceID(voiceName ?? currentVoice)
         let spd = speed ?? self.speed
 
         synthQueue.async { [self] in
@@ -665,7 +706,8 @@ final class OratorEngine: @unchecked Sendable {
         // would let timeline synthesis run concurrently with a table read (or a
         // second timeline), which breaks the "all MLX inference is serialized"
         // contract and can corrupt native inference state.
-        try synthQueue.sync {
+        let voiceID = effectiveVoiceID(voiceID)
+        return try synthQueue.sync {
             guard let renderProvider = provider(for: voiceID) else {
                 throw OratorError.voiceNotFound(voiceID)
             }
@@ -813,9 +855,10 @@ final class OratorEngine: @unchecked Sendable {
             var offset: TimeInterval = 0
             for (chunkIndex, item) in items.enumerated() {
                 if isCancelled(gen) { return }
-                guard let chunkProvider = provider(for: item.voiceID),
+                let voiceID = effectiveVoiceID(item.voiceID)
+                guard let chunkProvider = provider(for: voiceID),
                       let synthesis = try? chunkProvider.synthesize(
-                          text: item.text, voiceID: item.voiceID, speed: item.speed ?? defaultSpeed
+                          text: item.text, voiceID: voiceID, speed: item.speed ?? defaultSpeed
                       ), !synthesis.samples.isEmpty else { continue }
                 if isCancelled(gen) { return }
                 // Providers may emit at their own rate (Kokoro/Kitten 24 kHz,
