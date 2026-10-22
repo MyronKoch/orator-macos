@@ -18,6 +18,7 @@ MODEL_SRC=$(find ~/.cache/huggingface/hub/models--prince-canuma--Kokoro-82M/snap
 [ -n "$MODEL_SRC" ] || { echo "ERROR: kokoro-v1_0.safetensors not found in HuggingFace cache"; exit 1; }
 
 scripts/vendor-sherpa.sh
+scripts/vendor-phonon.sh
 
 echo "==> Building (xcodebuild, Release)…"
 xcodebuild -jobs 6 -scheme Orator -configuration Release \
@@ -40,6 +41,9 @@ cp -R "$PRODUCTS/mlx-swift_Cmlx.bundle" "$APP/Contents/Resources/"
 [ -d "$PRODUCTS/KokoroSwift_KokoroSwift.bundle" ] && cp -R "$PRODUCTS/KokoroSwift_KokoroSwift.bundle" "$APP/Contents/Resources/"
 [ -d "$PRODUCTS/MisakiSwift_MisakiSwift.bundle" ] && cp -R "$PRODUCTS/MisakiSwift_MisakiSwift.bundle" "$APP/Contents/Resources/"
 cp Resources/voices.npz "$APP/Contents/Resources/"
+
+echo "==> Copying Phonon model (163MB; copied to Application Support and compiled on first launch)…"
+cp -R Vendor/PhononModels "$APP/Contents/Resources/PhononModels"
 
 echo "==> Copying model (312MB, real copy — no symlinks)…"
 cp "$MODEL_SRC" "$APP/Contents/Resources/kokoro-v1_0.safetensors"
@@ -74,7 +78,7 @@ if [ -n "$SIGN_IDENTITY" ]; then
     fi
   done
   echo "==> Signing app (hardened runtime)…"
-  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"
+  codesign --force --options runtime --timestamp --entitlements Orator.entitlements --sign "$SIGN_IDENTITY" "$APP"
   echo "==> Verifying…"
   codesign --verify --deep --strict "$APP" && echo "    signature OK"
 else
