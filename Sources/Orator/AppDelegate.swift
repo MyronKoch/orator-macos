@@ -487,6 +487,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Orator window settings bridge
 
+    var localTTSServers: [(id: String, name: String)] { engine?.localServers ?? [] }
     var availableVoiceNames: [String] { engine?.voiceNames ?? [] }
     var availableVoices: [VoiceInfo] { engine?.availableVoices ?? [] }
     var hasNonKokoroVoiceInstalled: Bool {
