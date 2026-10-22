@@ -29,6 +29,8 @@
 	<string>15.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Orator records a short sample of your voice when you choose to create a cloned voice. The recording stays on this Mac.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 Myron Koch. Open source, MIT licensed.</string>
 	<key>NSServices</key>
