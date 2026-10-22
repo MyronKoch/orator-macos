@@ -57,11 +57,5 @@ let package = Package(
                 .linkedLibrary("c++"),
             ]
         ),
-        // SPIKE (temporary): load Phonon and write a WAV, to prove it runs beside MLX
-        // before it becomes Orator's default engine. Delete once PhononProvider lands.
-        .executableTarget(
-            name: "PhononSmoke",
-            dependencies: [.product(name: "ptts", package: "xn-ptts")]
-        ),
     ]
 )
