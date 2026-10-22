@@ -152,24 +152,35 @@ final class PhononProvider: TTSProvider, @unchecked Sendable {
             try Self.blocking { try await tts.setVoice(name) }
         }
         var samples = try Self.blocking { try await tts.synthesize(text) }
-        Self.fadeIn(&samples)
+        Self.fadeInRestarts(&samples)
         // Phonon has no speed control, so speed is applied afterwards as a
         // pitch-preserving tempo change.
         return TTSSynthesis(samples: TimeStretch.apply(samples, rate: speed, sampleRate: sampleRate), words: nil)
     }
 
-    /// Every Phonon utterance opens with the same decoder transient: a ~-40 dBFS
-    /// burst in the first millisecond, gone by ~5 ms, before any speech (measured
-    /// 2026-10-22, identical across sentences and voices). Orator synthesizes one
-    /// sentence per call, so unfaded it pops before every sentence. A 10 ms
-    /// raised-cosine fade-in removes it; speech starts later than that.
-    static let fadeInFrames = 240
+    /// Phonon restarts its decoder for each sentence, and every restart opens
+    /// with the same transient: ~-40 dBFS in the first millisecond, gone by ~5 ms,
+    /// out of near-silence - an audible pop before each sentence (measured
+    /// 2026-10-22 from in-app chunk dumps). Restarts always land on Phonon's
+    /// 80 ms output frame grid after a pause, so a 10 ms raised-cosine fade-in at
+    /// every grid point that follows 40 ms of quiet removes them without touching
+    /// speech, which starts later than that.
+    static let frameLength = 1920   // 80 ms at 24 kHz, Phonon's chunk size
+    static let fadeInFrames = 240   // 10 ms
+    static let quietLookback = 960  // 40 ms
+    static let quietLevel: Float = 0.003
 
-    static func fadeIn(_ samples: inout [Float]) {
-        let count = min(fadeInFrames, samples.count)
-        for index in 0..<count {
-            let gain = 0.5 - 0.5 * cos(Float.pi * Float(index) / Float(fadeInFrames))
-            samples[index] *= gain
+    static func fadeInRestarts(_ samples: inout [Float]) {
+        var start = 0
+        while start < samples.count {
+            let afterPause = start == 0 || !samples[max(0, start - quietLookback)..<start]
+                .contains { abs($0) >= quietLevel }
+            if afterPause {
+                for index in 0..<min(fadeInFrames, samples.count - start) {
+                    samples[start + index] *= 0.5 - 0.5 * cos(Float.pi * Float(index) / Float(fadeInFrames))
+                }
+            }
+            start += frameLength
         }
     }
 
