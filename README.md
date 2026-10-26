@@ -15,13 +15,13 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-coral"></a>
 </p>
 
-> **Apple Silicon only.** Orator runs the Kokoro model on the GPU through Apple's [MLX](https://github.com/ml-explore/mlx) framework, which is built exclusively for M-series chips. It will not run on Intel Macs. Anything M1 or newer (every Mac Apple has sold since late 2020) is supported.
+> **Apple Silicon only.** Orator's default voice engine, Phonon, runs on the Neural Engine through Core ML, and the optional Kokoro voices run on the GPU through Apple's [MLX](https://github.com/ml-explore/mlx) framework; both are built for M-series chips. It will not run on Intel Macs. Anything M1 or newer (every Mac Apple has sold since late 2020) is supported.
 
 **Highlight any text, anywhere on your Mac. Press a key. Hear it read aloud in a beautiful AI voice.**
 
-Orator is a free, open-source menu bar app that reads selected text out loud using the [Kokoro-82M](https://huggingface.co/prince-canuma/Kokoro-82M) neural text-to-speech model - running **entirely on your Mac**. No cloud. No subscription. No account. Nothing leaves your computer, ever.
+Orator is a free, open-source menu bar app that reads selected text out loud using [Phonon](https://github.com/gradium-ai/xn-ptts), a fast, natural neural text-to-speech model - running **entirely on your Mac**. No cloud. No subscription. No account. Nothing leaves your computer, ever.
 
-macOS's built-in "Speak Selection" is functional but robotic. Orator gives you 26 natural AI voices at the same one-keystroke convenience.
+macOS's built-in "Speak Selection" is functional but robotic. Orator gives you dozens of natural AI voices at the same one-keystroke convenience.
 
 ## How it works
 
@@ -33,9 +33,11 @@ Long articles start speaking in about a second: text is split at sentence bounda
 
 ## Features
 
-- **26 voices** - US & UK English, male & female, pick in the menu bar
+- **25 Phonon voices + 12 character voices** - US & UK English, male & female; star your favorites gold, silver or bronze
+- **More voices on demand** - optional Kokoro, Piper and KittenTTS voice packs, downloaded from inside the app
 - **Speed control** - 0.8x to 1.5x
-- **100% local & private** - on-device inference via Apple's MLX framework on the Neural-friendly GPU
+- **Script mode** - table reads with a voice per character, and a timeline editor
+- **100% local & private** - on-device inference; your text never leaves your Mac
 - **Menu bar fallbacks** - "Speak Clipboard" and "Stop Speaking" for hotkey-free use
 - **Start at Login** - set it once, forget it
 - **Free & MIT licensed**
@@ -44,7 +46,7 @@ Long articles start speaking in about a second: text is split at sentence bounda
 
 - **Apple Silicon Mac (M1 or newer)** - required; the model runs on the GPU via MLX, which has no Intel support
 - macOS 15 (Sequoia) or newer
-- ~400 MB disk space (the voice model is bundled in the app)
+- ~270 MB disk space (the Phonon model is bundled; Kokoro is an optional 312 MB download)
 
 ## Install
 
@@ -66,12 +68,13 @@ cd orator-macos
 ./scripts/make-dmg.sh                     # package build/Orator.app into a DMG
 ```
 
-The build downloads the Kokoro model from the HuggingFace cache
-(`prince-canuma/Kokoro-82M`); fetch it once with any HuggingFace client, or
-place `kokoro-v1_0.safetensors` in the cache manually.
+The build fetches two checksum-pinned downloads into the gitignored `Vendor/`
+folder: the Phonon 31M Core ML bundle (`scripts/vendor-phonon.sh`) and the
+sherpa-onnx framework (`scripts/vendor-sherpa.sh`). Kokoro is not needed to
+build; users download it from General settings.
 
-Voice embeddings ship in `Resources/voices.npz`, converted from the
-`.pt` files in the same HuggingFace repo.
+Kokoro voice embeddings ship in `Resources/voices.npz`, converted from the
+`.pt` files in the `prince-canuma/Kokoro-82M` HuggingFace repo.
 
 ## Architecture
 
@@ -85,13 +88,16 @@ Option+'  ──►  HotkeyManager (Carbon + NSEvent + CGEventTap, deduped)
               TextChunker — sentence-aware splits ≤350 chars
                     │
                     ▼
-              OratorEngine — KokoroSwift (MLX) synthesis, pipelined
+              OratorEngine — Phonon (Core ML) by default; Kokoro (MLX),
+                    │        Piper/Kitten (sherpa-onnx) optional; pipelined
                     │        chunk-by-chunk into an AVAudioPlayerNode queue
                     ▼
                  🔊 24 kHz audio
 ```
 
-Built on [kokoro-ios](https://github.com/mlalma/kokoro-ios) (KokoroSwift),
+Built on [Phonon / xn-ptts](https://github.com/gradium-ai/xn-ptts),
+[kokoro-ios](https://github.com/mlalma/kokoro-ios) (KokoroSwift),
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx),
 [mlx-swift](https://github.com/ml-explore/mlx-swift), and
 [MisakiSwift](https://github.com/mlalma/MisakiSwift) G2P.
 
