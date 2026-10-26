@@ -15,24 +15,19 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.7.0</string>
+	<string>1.8.0</string>
 	<key>CFBundleVersion</key>
-	<string>9</string>
+	<string>10</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
-	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/MyronKoch/orator-macos/master/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>lgO0DQnJT0ZRp+ylj6RZEuIuclYNMLjAQCw2ujjVhnw=</string>
-
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Orator records a short sample of your voice when you choose to create a cloned voice. The recording stays on this Mac.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 Myron Koch. Open source, MIT licensed.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Orator records a short sample of your voice when you choose to create a cloned voice. The recording stays on this Mac.</string>
 	<key>NSServices</key>
 	<array>
 		<dict>
@@ -92,5 +87,9 @@
 			</array>
 		</dict>
 	</array>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/MyronKoch/orator-macos/master/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>lgO0DQnJT0ZRp+ylj6RZEuIuclYNMLjAQCw2ujjVhnw=</string>
 </dict>
 </plist>
