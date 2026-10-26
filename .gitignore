@@ -8,3 +8,6 @@ branding/icon-master.png
 
 # Local backchannel session identity (per-checkout, never shared)
 .backchannel.json
+
+# Repackaged binary frameworks (scripts/vendor-sherpa.sh)
+Vendor/

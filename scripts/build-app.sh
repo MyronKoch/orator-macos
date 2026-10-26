@@ -14,11 +14,12 @@ if [ "${1:-}" = "--sign" ]; then
   SIGN_IDENTITY="${2:?identity required after --sign}"
 fi
 
-MODEL_SRC=$(find ~/.cache/huggingface/hub/models--prince-canuma--Kokoro-82M/snapshots -name "kokoro-v1_0.safetensors" 2>/dev/null | head -1)
-[ -n "$MODEL_SRC" ] || { echo "ERROR: kokoro-v1_0.safetensors not found in HuggingFace cache"; exit 1; }
+
+scripts/vendor-sherpa.sh
+scripts/vendor-phonon.sh
 
 echo "==> Building (xcodebuild, Release)…"
-xcodebuild -scheme Orator -configuration Release \
+xcodebuild -jobs 6 -scheme Orator -configuration Release \
   -destination 'platform=macOS' -derivedDataPath .build/xcode build -quiet
 
 PRODUCTS=".build/xcode/Build/Products/Release"
@@ -39,11 +40,15 @@ cp -R "$PRODUCTS/mlx-swift_Cmlx.bundle" "$APP/Contents/Resources/"
 [ -d "$PRODUCTS/MisakiSwift_MisakiSwift.bundle" ] && cp -R "$PRODUCTS/MisakiSwift_MisakiSwift.bundle" "$APP/Contents/Resources/"
 cp Resources/voices.npz "$APP/Contents/Resources/"
 
-echo "==> Copying model (312MB, real copy — no symlinks)…"
-cp "$MODEL_SRC" "$APP/Contents/Resources/kokoro-v1_0.safetensors"
+echo "==> Copying Phonon model (163MB; copied to Application Support and compiled on first launch)…"
+cp -R Vendor/PhononModels "$APP/Contents/Resources/PhononModels"
+
 
 if [ -f Resources/Orator.icns ]; then
   cp Resources/Orator.icns "$APP/Contents/Resources/"
+fi
+if [ -f Resources/Credits.html ]; then
+  cp Resources/Credits.html "$APP/Contents/Resources/"
 fi
 for icon in Resources/menubar-idle.png Resources/menubar-speaking.png; do
   [ -f "$icon" ] && cp "$icon" "$APP/Contents/Resources/"
@@ -72,7 +77,7 @@ if [ -n "$SIGN_IDENTITY" ]; then
     fi
   done
   echo "==> Signing app (hardened runtime)…"
-  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"
+  codesign --force --options runtime --timestamp --entitlements Orator.entitlements --sign "$SIGN_IDENTITY" "$APP"
   echo "==> Verifying…"
   codesign --verify --deep --strict "$APP" && echo "    signature OK"
 else

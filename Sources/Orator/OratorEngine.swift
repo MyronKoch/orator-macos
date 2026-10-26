@@ -63,11 +63,11 @@ final class OratorEngine: @unchecked Sendable {
     /// The synthesis source. Everything below this line is engine-agnostic:
     /// the provider supplies PCM, this class still owns scheduling and the
     /// generation/lock/scheduledBuffers/synthesisDone/speaking state machine.
-    /// The bundled default engine. Nullable so it can be UNLOADED to reclaim
-    /// its ~380 MB for users who live entirely in Piper/Kitten. Guarded by
-    /// `providerLock`. The model paths are kept so it can be reloaded.
+    /// Kokoro, now an optional download (Phonon is the default). Nullable so it
+    /// can be absent, or UNLOADED to reclaim its ~380 MB. Guarded by
+    /// `providerLock`, as is the model path, which is nil until it is installed.
     private var kokoro: KokoroProvider?
-    private let kokoroModelPath: URL
+    private var kokoroModelPath: URL?
     private let kokoroVoicesPath: URL
 
     /// Thread-safe read of the optional Kokoro provider.
@@ -84,9 +84,10 @@ final class OratorEngine: @unchecked Sendable {
     /// must ensure the current voice isn't a Kokoro voice before disabling.
     func setKokoroEnabled(_ enabled: Bool) {
         if enabled {
-            guard kokoroProvider() == nil,
+            providerLock.lock(); let modelPath = kokoroModelPath; providerLock.unlock()
+            guard kokoroProvider() == nil, let modelPath,
                   let loaded = try? KokoroProvider(
-                      modelPath: kokoroModelPath, voicesPath: kokoroVoicesPath
+                      modelPath: modelPath, voicesPath: kokoroVoicesPath
                   ) else { return }
             providerLock.lock(); kokoro = loaded; providerLock.unlock()
             oratorLog("kokoro: enabled (reloaded)")
@@ -97,6 +98,35 @@ final class OratorEngine: @unchecked Sendable {
             oratorLog("kokoro: disabled (released ~380 MB)")
         }
     }
+
+    /// Whether the Kokoro model is on this Mac (downloaded), loaded or not.
+    var isKokoroInstalled: Bool {
+        providerLock.lock(); defer { providerLock.unlock() }
+        return kokoroModelPath != nil
+    }
+
+    /// Adopt a freshly downloaded Kokoro model, loading it when `load` is true.
+    func installKokoro(modelPath: URL, load: Bool) {
+        providerLock.lock(); kokoroModelPath = modelPath; providerLock.unlock()
+        if load { setKokoroEnabled(true) }
+    }
+
+    /// Forget the Kokoro model (after its file is removed) and unload it.
+    func uninstallKokoro() {
+        setKokoroEnabled(false)
+        providerLock.lock(); kokoroModelPath = nil; providerLock.unlock()
+    }
+
+    /// The voice that actually speaks `voiceID`. Kokoro names are bare
+    /// (`af_heart`) and live on in saved prefs, app profiles, script casts and the
+    /// auto-casters' pool; when Kokoro is not loaded they play as their Phonon
+    /// equivalent instead of falling silent.
+    private func effectiveVoiceID(_ voiceID: String) -> String {
+        guard VoiceInfo.providerID(of: voiceID) == nil, kokoroProvider() == nil, phonon != nil,
+              let mapped = PhononProvider.voiceID(forKokoro: voiceID)
+        else { return voiceID }
+        return mapped
+    }
     /// Downloadable sherpa-onnx models keyed by their catalog archive name.
     /// Sherpa models are loaded LAZILY (only when a voice is actually spoken)
     /// and bounded by an LRU cap, so RAM stays ~Kokoro + the active voice no
@@ -106,6 +136,19 @@ final class OratorEngine: @unchecked Sendable {
     private var lruOrder: [String] = []          // archives, most-recently-used last
     private let maxLoadedModels = 2              // cap resident sherpa models
     private let providerLock = NSLock()
+
+    /// Cloud voices (Cloudflare Workers AI: Deepgram Aura + MeloTTS). Nil when no
+    /// credentials are configured, which cleanly hides all cloud voices. This is
+    /// a DEV-only path (see CloudTTSProvider) - not for a published build. Every
+    /// cloud call is METERED from day one through `cloudMeter`.
+    let cloudMeter = CloudUsageMeter()
+    private let cloud: CloudTTSProvider?
+    /// OpenAI-compatible TTS servers on this Mac (Phonon, Pocket). Loopback only,
+    /// so this stays on-device. Nil when none are running.
+    private let local: LocalTTSProvider?
+    /// Phonon, the bundled default engine. Nil only when the app was built
+    /// without its model, which leaves Kokoro as the default.
+    private let phonon: PhononProvider?
 
     /// VoiceInfos a catalog model declares, without loading it.
     private func catalogVoiceInfos(for model: CatalogModel) -> [VoiceInfo] {
@@ -160,6 +203,15 @@ final class OratorEngine: @unchecked Sendable {
     /// a background/synth thread: it may block loading the model. UI validation
     /// uses `canSpeak(voiceID:)` instead, which never loads.
     private func provider(for voiceID: String) -> TTSProvider? {
+        if VoiceInfo.providerID(of: voiceID) == "phonon" {
+            return phonon
+        }
+        if VoiceInfo.providerID(of: voiceID) == "cf" {
+            return cloud
+        }
+        if VoiceInfo.providerID(of: voiceID) == "local" {
+            return local
+        }
         if let model = VoiceCatalog.model(forVoiceID: voiceID),
            isInstalled(model),
            let provider = loadedProvider(for: model) {
@@ -185,10 +237,19 @@ final class OratorEngine: @unchecked Sendable {
 
     // MARK: - Settings (persisted by the app layer)
 
-    var currentVoice: String = "af_heart"
+    var currentVoice: String = "af_heart"  // replaced with `defaultVoice` or the saved pref at launch
     var speed: Float = 1.0
 
-    var voiceNames: [String] { kokoroProvider()?.localVoiceNames ?? [] }
+    /// Kokoro-style names (`af_heart`...) the auto-casters and app profiles pick
+    /// from. Without Kokoro, the names that have a Phonon narrator equivalent,
+    /// so casting keeps working (they play through `effectiveVoiceID`).
+    var voiceNames: [String] {
+        if let names = kokoroProvider()?.localVoiceNames { return names }
+        guard phonon != nil else { return [] }
+        return PhononProvider.kokoroEquivalent
+            .filter { !PhononProvider.characterVoices.contains($0.value) }
+            .map(\.key).sorted()
+    }
 
     /// Every voice across all installed providers, namespaced and in catalog
     /// order after the bundled Kokoro voices.
@@ -198,7 +259,37 @@ final class OratorEngine: @unchecked Sendable {
         let catalogVoices = VoiceCatalog.models
             .filter { isInstalled($0) }
             .flatMap { catalogVoiceInfos(for: $0) }
-        return (kokoroProvider()?.voices() ?? []) + catalogVoices
+        // Cloud voices need no install - always listed when credentials exist.
+        let cloudVoices = cloud?.voices() ?? []
+        let localVoices = local?.voices() ?? []
+        let phononVoices = phonon?.voices() ?? []
+        return phononVoices + (kokoroProvider()?.voices() ?? []) + localVoices + catalogVoices + cloudVoices
+    }
+
+    /// The voice used when the user has not picked one: Phonon's Harper when the
+    /// model shipped, else Kokoro's af_heart (the voice Harper stands in for).
+    var defaultVoice: String {
+        phonon == nil ? "af_heart" : VoiceInfo.namespaced(provider: "phonon", local: PhononProvider.defaultVoice)
+    }
+
+    /// Whether Phonon is bundled (its voices list before the model finishes loading).
+    var isPhononAvailable: Bool { phonon != nil }
+
+    /// Phonon's character voices (Snow Queen, Ogre...), split out for the picker.
+    func isPhononCharacter(_ voiceID: String) -> Bool { phonon?.isCharacter(voiceID) ?? false }
+
+    /// Whether cloud (Cloudflare) voices are configured and selectable.
+    var isCloudAvailable: Bool { cloud != nil }
+
+    /// Re-read local server voice lists (after a clone is created or deleted).
+    func refreshLocalVoices() { local?.refresh() }
+
+    /// Base URL of a local server ("pocket"), nil when it is not running.
+    func localServerURL(_ id: String) -> URL? { local?.baseURL(forServer: id) }
+
+    /// Local servers that answered at launch, for the picker's section headers.
+    var localServers: [(id: String, name: String)] {
+        local?.servers.map { ($0.id, $0.name) } ?? []
     }
 
     /// Kitten (sherpa-onnx) voices only, or empty when that engine isn't loaded.
@@ -223,10 +314,20 @@ final class OratorEngine: @unchecked Sendable {
     /// namespaced id like `kitten:0`). Catalog/disk-based, so it never triggers a
     /// model load - safe to call from the UI to validate a selection.
     func canSpeak(voiceID: String) -> Bool {
+        if VoiceInfo.providerID(of: voiceID) == "phonon" {
+            return phonon?.canSpeak(voiceID: voiceID) ?? false
+        }
+        if VoiceInfo.providerID(of: voiceID) == "cf" {
+            return cloud?.canSpeak(voiceID: voiceID) ?? false
+        }
+        if VoiceInfo.providerID(of: voiceID) == "local" {
+            return local?.canSpeak(voiceID: voiceID) ?? false
+        }
         if let model = VoiceCatalog.model(forVoiceID: voiceID) {
             return isInstalled(model)
         }
-        return kokoroProvider()?.canSpeak(voiceID: voiceID) ?? false
+        if let kokoro = kokoroProvider() { return kokoro.canSpeak(voiceID: voiceID) }
+        return effectiveVoiceID(voiceID) != voiceID
     }
 
     /// Compatibility alias for callers that predate the full voice catalog.
@@ -247,6 +348,33 @@ final class OratorEngine: @unchecked Sendable {
             isDirectory: &isDirectory
         )
         return exists && isDirectory.boolValue
+    }
+
+    /// Delete an installed sherpa model from disk and evict it from the resident
+    /// cache. Returns true if a directory was removed. Safe on the main thread.
+    /// The caller must first re-home `currentVoice` if it belongs to this model,
+    /// since availability drops the instant the directory is gone.
+    ///
+    /// Order matters: the resident provider (and its LRU slot) is dropped BEFORE
+    /// the files are deleted, so the ONNX session and its file handles are
+    /// released first. No MLX is involved here (that is Kokoro only), so there is
+    /// nothing to `clearCache`; freeing the provider returns its RAM directly.
+    func uninstall(_ model: CatalogModel) -> Bool {
+        providerLock.lock()
+        loadedModels[model.archive] = nil
+        lruOrder.removeAll { $0 == model.archive }
+        providerLock.unlock()
+
+        let dir = VoiceCatalog.installDir(for: model)
+        guard FileManager.default.fileExists(atPath: dir.path) else { return false }
+        do {
+            try FileManager.default.removeItem(at: dir)
+            oratorLog("uninstalled \(model.archive)")
+            return true
+        } catch {
+            oratorLog("uninstall \(model.archive) failed: \(error.localizedDescription)")
+            return false
+        }
     }
 
     var installedVoiceIDs: Set<String> {
@@ -346,17 +474,22 @@ final class OratorEngine: @unchecked Sendable {
 
     // MARK: - Init
 
-    init(modelPath: URL, voicesPath: URL) throws {
+    /// `kokoroModelPath` is nil when Kokoro has not been downloaded; Phonon is the
+    /// default either way. `loadKokoro` false keeps an installed Kokoro unloaded.
+    init(kokoroModelPath modelPath: URL?, voicesPath: URL, loadKokoro: Bool) {
         kokoroModelPath = modelPath
         kokoroVoicesPath = voicesPath
-        let loadedKokoro = try KokoroProvider(modelPath: modelPath, voicesPath: voicesPath)
-        kokoro = loadedKokoro
+        if loadKokoro, let modelPath {
+            kokoro = try? KokoroProvider(modelPath: modelPath, voicesPath: voicesPath)
+        }
         // Sherpa models are NOT eager-loaded; they load lazily on first use.
+        // Cloud provider is nil unless credentials are configured (DEV only).
+        cloud = CloudTTSProvider(meter: cloudMeter)
+        local = LocalTTSProvider()
+        phonon = PhononProvider.makeIfAvailable()
 
-        format = AVAudioFormat(
-            standardFormatWithSampleRate: loadedKokoro.sampleRate,
-            channels: 1
-        )!
+        // 24 kHz: Phonon, Kokoro, Kitten and Pocket all emit it; others resample.
+        format = AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1)!
         audioEngine.attach(player)
         audioEngine.connect(player, to: audioEngine.mainMixerNode, format: format)
         installOutputLatencyObservers()
@@ -533,7 +666,7 @@ final class OratorEngine: @unchecked Sendable {
         completion: @escaping @Sendable (Result<URL, Error>) -> Void
     ) {
         let chunks = TextChunker.chunk(text)
-        let voiceKey = voiceName ?? currentVoice
+        let voiceKey = effectiveVoiceID(voiceName ?? currentVoice)
         let spd = speed ?? self.speed
 
         synthQueue.async { [self] in
@@ -589,6 +722,83 @@ final class OratorEngine: @unchecked Sendable {
                 finish(.failure(error))
             }
         }
+    }
+
+    /// Synthesize text to raw PCM, resampled to the ENGINE's format so callers
+    /// can mix results from different providers into one buffer. Blocking - call
+    /// off the main thread. This is what the timeline uses to render clips.
+    func renderSamples(text: String, voiceID: String, speed: Float?) throws -> [Float] {
+        // MUST run on synthQueue. All inference is serialized there, and the
+        // timeline renders from its OWN queue - calling the provider directly
+        // would let timeline synthesis run concurrently with a table read (or a
+        // second timeline), which breaks the "all MLX inference is serialized"
+        // contract and can corrupt native inference state.
+        let voiceID = effectiveVoiceID(voiceID)
+        return try synthQueue.sync {
+            guard let renderProvider = provider(for: voiceID) else {
+                throw OratorError.voiceNotFound(voiceID)
+            }
+            let rate = speed ?? self.speed
+            var out: [Float] = []
+            for chunk in TextChunker.chunk(text) {
+                let samples = try renderProvider.synthesize(
+                    text: chunk, voiceID: voiceID, speed: rate
+                ).samples
+                guard !samples.isEmpty else { continue }
+                out += resample(samples, from: renderProvider.sampleRate, to: format.sampleRate)
+            }
+            return out
+        }
+    }
+
+    /// The engine's output sample rate - the common rate every timeline clip is
+    /// normalized to before mixing.
+    var outputSampleRate: Double { format.sampleRate }
+
+    /// Play a pre-mixed buffer (the timeline mixdown) through the normal player,
+    /// reusing the engine's generation/cancellation machinery. `synthesisDone` is
+    /// true up front because there is exactly one buffer and no synthesis loop
+    /// following it, so the player going idle is the end of the utterance.
+    /// Play a mixdown starting `fromMS` into it. Seeking is possible precisely
+    /// BECAUSE the timeline plays one contiguous buffer: jumping is just
+    /// scheduling from a later frame, so a click during playback can restart at
+    /// the new spot and carry on. Callers add `fromMS` to `playbackPosition` to
+    /// get the true timeline position.
+    @discardableResult
+    func playMixedBuffer(_ samples: [Float], fromMS: Int = 0) throws -> Int {
+        guard !samples.isEmpty else { return -1 }
+        let startFrame = max(0, min(samples.count, Int(Double(fromMS) / 1000.0 * format.sampleRate)))
+        let samples = startFrame > 0 ? Array(samples[startFrame...]) : samples
+        guard !samples.isEmpty else { return -1 }
+        lock.lock()
+        generation += 1
+        let gen = generation
+        scheduledBuffers = 0
+        synthesisDone = true
+        speaking = true
+        _paused = false
+        lock.unlock()
+
+        player.stop()
+        if !audioEngine.isRunning {
+            do {
+                try audioEngine.start()
+            } catch {
+                // Roll the state back, or `speaking` stays true forever and the
+                // caller's playhead timer never stops.
+                lock.lock()
+                speaking = false
+                _paused = false
+                lock.unlock()
+                throw error
+            }
+            refreshOutputLatency()
+        }
+        player.play()
+        NotificationCenter.default.post(name: .oratorSpeechStarted, object: nil)
+
+        schedule(samples: samples, sampleRate: format.sampleRate, generation: gen)
+        return gen
     }
 
     // MARK: - Speak / Stop
@@ -672,15 +882,18 @@ final class OratorEngine: @unchecked Sendable {
             var offset: TimeInterval = 0
             for (chunkIndex, item) in items.enumerated() {
                 if isCancelled(gen) { return }
-                guard let chunkProvider = provider(for: item.voiceID),
+                let voiceID = effectiveVoiceID(item.voiceID)
+                guard let chunkProvider = provider(for: voiceID),
                       let synthesis = try? chunkProvider.synthesize(
-                          text: item.text, voiceID: item.voiceID, speed: item.speed ?? defaultSpeed
+                          text: item.text, voiceID: voiceID, speed: item.speed ?? defaultSpeed
                       ), !synthesis.samples.isEmpty else { continue }
                 if isCancelled(gen) { return }
                 // Providers may emit at their own rate (Kokoro/Kitten 24 kHz,
                 // Piper 22.05 kHz). schedule() resamples to the engine format so
                 // Piper doesn't play fast/high; timing uses the source rate so
                 // durations stay correct.
+                Self.dumpChunkIfEnabled(synthesis.samples, sampleRate: chunkProvider.sampleRate,
+                                        text: item.text, voiceID: item.voiceID, index: chunkIndex)
                 schedule(samples: synthesis.samples, sampleRate: chunkProvider.sampleRate, generation: gen)
                 offset += emitChunkTiming(
                     synthesis.words, chunkText: item.text, chunkIndex: chunkIndex,
@@ -749,6 +962,29 @@ final class OratorEngine: @unchecked Sendable {
         )
         DispatchQueue.main.async { callback(timing) }
         return duration
+    }
+
+    /// DEV diagnostics: with `defaults write com.myronkoch.orator debugDumpChunks -bool YES`,
+    /// every chunk is written exactly as synthesized to /tmp/orator-chunks/ (a
+    /// WAV plus its text), so playback artifacts can be measured, not guessed.
+    private static func dumpChunkIfEnabled(
+        _ samples: [Float], sampleRate: Double, text: String, voiceID: String, index: Int
+    ) {
+        guard UserDefaults.standard.bool(forKey: "debugDumpChunks") else { return }
+        let dir = URL(fileURLWithPath: "/tmp/orator-chunks")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let stem = String(format: "%@-%03d", ISO8601DateFormatter().string(from: Date()), index)
+        try? "\(voiceID)\n\(text)".write(to: dir.appendingPathComponent(stem + ".txt"), atomically: true, encoding: .utf8)
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))
+        else { return }
+        buffer.frameLength = buffer.frameCapacity
+        samples.withUnsafeBufferPointer { buffer.floatChannelData![0].update(from: $0.baseAddress!, count: samples.count) }
+        // Scoped so the file is closed (and its header finalised) before returning.
+        do {
+            let file = try AVAudioFile(forWriting: dir.appendingPathComponent(stem + ".wav"), settings: format.settings)
+            try file.write(from: buffer)
+        } catch {}
     }
 
     /// Linear-rate convert mono float samples from `srcRate` to `dstRate`.
