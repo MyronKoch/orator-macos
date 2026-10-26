@@ -97,6 +97,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         loadEngineAsync()
         registerServices()
+        NotificationCenter.default.addObserver(
+            forName: .oratorFavoritesChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.rebuildMenu() }
+        }
 
         // If a prior grant went stale after a re-signed rebuild, clear the dead
         // TCC entry BEFORE the trust check so the onboarding prompt can re-add a
@@ -1255,6 +1260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        menu.applyVoiceFavorites()
         return menu
     }
 
