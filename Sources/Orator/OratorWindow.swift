@@ -807,6 +807,8 @@ private final class CatalogModelRowView: NSView {
 private final class VoicesSettingsViewController: NSViewController {
     private unowned let appDelegate: AppDelegate
     private let voicePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// Sets the selected voice's favorite level (gold/silver/bronze/none).
+    private let favoriteButton = NSButton()
     private let speedPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let cloneVoiceButton = NSButton(title: "Clone a Voice...", target: nil, action: nil)
     private var voiceCloneController: VoiceCloneWindowController?
@@ -896,7 +898,14 @@ private final class VoicesSettingsViewController: NSViewController {
         let preview = NSButton(title: "Preview", target: self, action: #selector(previewVoice))
         preview.bezelStyle = .rounded
 
-        let voiceColumn = NSStackView(views: [voiceLabel, voicePopup])
+        favoriteButton.bezelStyle = .rounded
+        favoriteButton.imagePosition = .imageOnly
+        favoriteButton.target = self
+        favoriteButton.action = #selector(showFavoriteMenu(_:))
+        favoriteButton.toolTip = "Favorite this voice: gold, silver or bronze (keys 1, 2, 3; 0 clears)"
+        let voiceRow = NSStackView(views: [voicePopup, favoriteButton])
+        voiceRow.spacing = 6
+        let voiceColumn = NSStackView(views: [voiceLabel, voiceRow])
         voiceColumn.orientation = .vertical
         voiceColumn.alignment = .leading
         voiceColumn.spacing = 5
@@ -946,7 +955,7 @@ private final class VoicesSettingsViewController: NSViewController {
         stack.addArrangedSubview(libraryHeading)
         stack.addArrangedSubview(voiceLibrary)
         let auditionHint = NSTextField(
-            wrappingLabelWithString: "Tip: press [ or ] to step through voices and hear each one instantly."
+            wrappingLabelWithString: "Tip: press [ or ] (or ↑ ↓) to step through voices and hear each one instantly. Press 1, 2 or 3 to star the current voice gold, silver or bronze, 0 to clear it."
         )
         auditionHint.font = .systemFont(ofSize: 11)
         auditionHint.textColor = .secondaryLabelColor
@@ -1090,6 +1099,10 @@ private final class VoicesSettingsViewController: NSViewController {
         switch characters {
         case "]": stepVoice(1); return true
         case "[": stepVoice(-1); return true
+        case "1": setFavorite(.gold); return true
+        case "2": setFavorite(.silver); return true
+        case "3": setFavorite(.bronze); return true
+        case "0": setFavorite(nil); return true
         default: return false
         }
     }
@@ -1311,11 +1324,13 @@ private final class VoicesSettingsViewController: NSViewController {
             }
         }
 
+        voicePopup.menu?.applyVoiceFavorites()
         if let index = voicePopup.menu?.items.firstIndex(where: {
             ($0.representedObject as? String) == appDelegate.selectedVoiceName
         }) {
             voicePopup.selectItem(at: index)
         }
+        updateFavoriteButton()
         voicePopup.isEnabled = !appDelegate.availableVoices.isEmpty
     }
 
@@ -1338,6 +1353,44 @@ private final class VoicesSettingsViewController: NSViewController {
         let field = NSTextField(labelWithString: title)
         field.font = .systemFont(ofSize: 12, weight: .medium)
         return field
+    }
+
+    private func updateFavoriteButton() {
+        let level = VoiceFavorites.level(for: appDelegate.selectedVoiceName)
+        favoriteButton.image = level?.star ?? FavoriteLevel.star(color: .secondaryLabelColor, filled: false)
+    }
+
+    /// Star (or un-star) the selected voice, keeping the selection on it.
+    private func setFavorite(_ level: FavoriteLevel?) {
+        VoiceFavorites.set(level, for: appDelegate.selectedVoiceName)
+        rebuildVoiceMenu()
+    }
+
+    @objc private func showFavoriteMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let current = VoiceFavorites.level(for: appDelegate.selectedVoiceName)
+        for (index, level) in FavoriteLevel.allCases.enumerated() {
+            let item = NSMenuItem(title: level.title, action: #selector(pickFavorite(_:)), keyEquivalent: "\(index + 1)")
+            item.keyEquivalentModifierMask = []
+            item.target = self
+            item.image = level.star
+            item.tag = level.rawValue
+            item.state = current == level ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let clear = NSMenuItem(title: "Not a favorite", action: #selector(pickFavorite(_:)), keyEquivalent: "0")
+        clear.keyEquivalentModifierMask = []
+        clear.target = self
+        clear.tag = 0
+        clear.isEnabled = current != nil
+        menu.addItem(clear)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+    }
+
+    @objc private func pickFavorite(_ sender: NSMenuItem) {
+        setFavorite(FavoriteLevel(rawValue: sender.tag))
     }
 
     @objc private func changeVoice(_ sender: NSPopUpButton) {
