@@ -667,6 +667,7 @@ private final class CatalogModelRowView: NSView {
     private let model: CatalogModel
     private let onInstalled: @MainActor () -> Void
     private let installedLabel = NSTextField(labelWithString: "Installed")
+    private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
     private let downloadButton = NSButton(title: "Download", target: nil, action: nil)
     private let progressIndicator = NSProgressIndicator()
     private let progressLabel = NSTextField(labelWithString: "")
@@ -693,6 +694,7 @@ private final class CatalogModelRowView: NSView {
         guard !isDownloadInFlight else { return }
         let installed = appDelegate.isInstalled(model)
         installedLabel.isHidden = !installed
+        removeButton.isHidden = !installed
         downloadButton.isHidden = installed
         progressIndicator.isHidden = true
         progressLabel.isHidden = true
@@ -719,6 +721,13 @@ private final class CatalogModelRowView: NSView {
         downloadButton.controlSize = .small
         downloadButton.setContentHuggingPriority(.required, for: .horizontal)
 
+        removeButton.target = self
+        removeButton.action = #selector(removeModel)
+        removeButton.bezelStyle = .rounded
+        removeButton.controlSize = .small
+        removeButton.isHidden = true
+        removeButton.setContentHuggingPriority(.required, for: .horizontal)
+
         progressIndicator.isIndeterminate = false
         progressIndicator.minValue = 0
         progressIndicator.maxValue = 100
@@ -732,7 +741,7 @@ private final class CatalogModelRowView: NSView {
         progressLabel.widthAnchor.constraint(equalToConstant: 30).isActive = true
 
         let controls = NSStackView(
-            views: [installedLabel, downloadButton, progressIndicator, progressLabel]
+            views: [installedLabel, removeButton, downloadButton, progressIndicator, progressLabel]
         )
         controls.orientation = .horizontal
         controls.alignment = .centerY
@@ -801,13 +810,32 @@ private final class CatalogModelRowView: NSView {
             }
         )
     }
+
+    @objc private func removeModel() {
+        let names = model.voices.map(\.displayName).joined(separator: ", ")
+        let alert = NSAlert()
+        alert.messageText = "Remove \(names)?"
+        alert.informativeText = "This frees ~\(model.approxSizeMB) MB. You can download it again anytime from the Voice Library."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        appDelegate.removeCatalogModel(model)
+        refreshInstallationStatus()
+        onInstalled()
+    }
 }
 
 @MainActor
 private final class VoicesSettingsViewController: NSViewController {
     private unowned let appDelegate: AppDelegate
     private let voicePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// Sets the selected voice's favorite level (gold/silver/bronze/none).
+    private let favoriteButton = NSButton()
     private let speedPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let cloneVoiceButton = NSButton(title: "Clone a Voice...", target: nil, action: nil)
+    private var voiceCloneController: VoiceCloneWindowController?
     private var catalogRows: [CatalogModelRowView] = []
     private let autoCastCheckbox = NSButton(
         checkboxWithTitle: "Dramatize dialogue", target: nil, action: nil
@@ -894,7 +922,14 @@ private final class VoicesSettingsViewController: NSViewController {
         let preview = NSButton(title: "Preview", target: self, action: #selector(previewVoice))
         preview.bezelStyle = .rounded
 
-        let voiceColumn = NSStackView(views: [voiceLabel, voicePopup])
+        favoriteButton.bezelStyle = .rounded
+        favoriteButton.imagePosition = .imageOnly
+        favoriteButton.target = self
+        favoriteButton.action = #selector(showFavoriteMenu(_:))
+        favoriteButton.toolTip = "Favorite this voice: gold, silver or bronze (keys 1, 2, 3; 0 clears)"
+        let voiceRow = NSStackView(views: [voicePopup, favoriteButton])
+        voiceRow.spacing = 6
+        let voiceColumn = NSStackView(views: [voiceLabel, voiceRow])
         voiceColumn.orientation = .vertical
         voiceColumn.alignment = .leading
         voiceColumn.spacing = 5
@@ -929,17 +964,22 @@ private final class VoicesSettingsViewController: NSViewController {
         libraryHeading.font = .systemFont(ofSize: 15, weight: .semibold)
         let voiceLibrary = makeVoiceLibrary()
 
+        cloneVoiceButton.bezelStyle = .rounded
+        cloneVoiceButton.target = self
+        cloneVoiceButton.action = #selector(cloneVoice)
+
         stack.addArrangedSubview(heading)
         stack.addArrangedSubview(helper)
         stack.setCustomSpacing(20, after: helper)
         stack.addArrangedSubview(autoCastControls)
         autoCastHelp.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         stack.addArrangedSubview(globalBox)
+        stack.addArrangedSubview(cloneVoiceButton)
         stack.setCustomSpacing(20, after: globalBox)
         stack.addArrangedSubview(libraryHeading)
         stack.addArrangedSubview(voiceLibrary)
         let auditionHint = NSTextField(
-            wrappingLabelWithString: "Tip: press [ or ] to step through voices and hear each one instantly."
+            wrappingLabelWithString: "Tip: press [ or ] (or ↑ ↓) to step through voices and hear each one instantly. Press 1, 2 or 3 to star the current voice gold, silver or bronze, 0 to clear it."
         )
         auditionHint.font = .systemFont(ofSize: 11)
         auditionHint.textColor = .secondaryLabelColor
@@ -962,8 +1002,9 @@ private final class VoicesSettingsViewController: NSViewController {
                 self?.syncAutoCastState()
             }
         }
-        // Audition voices from the keyboard: [ = previous, ] = next, each auto-previews.
-        // Local monitors deliver on the main thread; scoped below to when this tab is showing.
+        // Audition voices from the keyboard: Up/Down arrows (or [ / ]) = previous/next,
+        // each auto-previews. Local monitors deliver on the main thread; scoped below
+        // to when this tab is showing.
         voiceKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             // Extract Sendable primitives here; never move the non-Sendable NSEvent
@@ -1054,16 +1095,38 @@ private final class VoicesSettingsViewController: NSViewController {
         return scrollView
     }
 
-    /// [ / ] step through the voice list and auto-preview, but only while the Voices
-    /// tab is actually on screen (display(_:) removes off-screen tabs, so voicePopup.window
-    /// is nil for other tabs) and not while editing text. Returns true if it consumed the key.
+    /// Up/Down arrows (and [ / ]) step through the voice list and auto-preview,
+    /// but only while the Voices tab is actually on screen (display(_:) removes
+    /// off-screen tabs, so voicePopup.window is nil for other tabs) and not while
+    /// editing text. Returns true if it consumed the key.
     private func handleVoiceKey(characters: String?, modifiers: NSEvent.ModifierFlags) -> Bool {
         guard let window = voicePopup.window, window.isKeyWindow, voicePopup.isEnabled else { return false }
         if let editor = window.firstResponder as? NSText, editor.isFieldEditor { return false }
-        guard modifiers.intersection(.deviceIndependentFlagsMask).isEmpty else { return false }
+        // Disqualify real modifier chords (cmd/opt/ctrl/shift). Arrow keys also
+        // report .function/.numericPad, which must NOT count as a real modifier -
+        // the old .deviceIndependentFlagsMask check silently rejected arrows.
+        let realModifiers: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+        guard modifiers.intersection(realModifiers).isEmpty else { return false }
+
+        // Up/Down arrows audition too (matching the popup's up/down chevrons).
+        // Do NOT yield to the sidebar table - it holds first-responder focus when
+        // the dropdown is closed, so yielding to it made arrows navigate AWAY from
+        // the Voices tab instead of stepping voices. On the Voices tab, arrows are
+        // ours; only a deliberately-focused speed popup keeps native arrow behavior.
+        if let value = characters?.unicodeScalars.first.map({ Int($0.value) }),
+           value == NSUpArrowFunctionKey || value == NSDownArrowFunctionKey {
+            if window.firstResponder === speedPopup { return false }
+            stepVoice(value == NSUpArrowFunctionKey ? -1 : 1)
+            return true
+        }
+
         switch characters {
         case "]": stepVoice(1); return true
         case "[": stepVoice(-1); return true
+        case "1": setFavorite(.gold); return true
+        case "2": setFavorite(.silver); return true
+        case "3": setFavorite(.bronze); return true
+        case "0": setFavorite(nil); return true
         default: return false
         }
     }
@@ -1091,6 +1154,7 @@ private final class VoicesSettingsViewController: NSViewController {
 
     func refresh() {
         guard isViewLoaded else { return }
+        cloneVoiceButton.isHidden = appDelegate.pocketServerURL == nil
         rebuildVoiceMenu()
         rebuildSpeedMenu()
         for row in catalogRows {
@@ -1098,6 +1162,18 @@ private final class VoicesSettingsViewController: NSViewController {
         }
         syncAutoCastState()
         appDelegate.refreshAppVoiceProfilesEditor()
+    }
+
+    @objc private func cloneVoice() {
+        guard let window = view.window, window.attachedSheet == nil,
+              voiceCloneController == nil, appDelegate.pocketServerURL != nil else { return }
+        let controller = VoiceCloneWindowController(appDelegate: appDelegate)
+        // Retain the controller through dismissal so its recorder and take outlive this handler.
+        voiceCloneController = controller
+        controller.beginSheet(on: window) { [weak self] in
+            self?.voiceCloneController = nil
+            self?.refresh()
+        }
     }
 
     private func syncAutoCastState() {
@@ -1124,18 +1200,39 @@ private final class VoicesSettingsViewController: NSViewController {
 
     private func rebuildVoiceMenu() {
         voicePopup.removeAllItems()
+        voicePopup.autoenablesItems = false  // honour isEnabled on headers and locked Pro voices
         let voices = appDelegate.availableVoiceNames
         let groups: [(title: String, prefix: String)] = [
-            ("US · Female", "af"),
-            ("US · Male", "am"),
-            ("UK · Female", "bf"),
-            ("UK · Male", "bm"),
+            ("Kokoro · US Female", "af"),
+            ("Kokoro · US Male", "am"),
+            ("Kokoro · UK Female", "bf"),
+            ("Kokoro · UK Male", "bm"),
         ]
 
-        for (groupIndex, group) in groups.enumerated() {
+        // Phonon, the default engine, first: narrators, then character voices.
+        let phononVoices = appDelegate.availableVoices.filter { $0.provider == "phonon" }
+        let phononSections: [(title: String, voices: [VoiceInfo])] = [
+            ("Phonon", phononVoices.filter { !appDelegate.isPhononCharacter($0.id) }),
+            ("Phonon · Characters", phononVoices.filter { appDelegate.isPhononCharacter($0.id) }),
+        ]
+        for section in phononSections where !section.voices.isEmpty {
+            if !(voicePopup.menu?.items.isEmpty ?? true) {
+                voicePopup.menu?.addItem(.separator())
+            }
+            let header = NSMenuItem(title: section.title, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            voicePopup.menu?.addItem(header)
+            for voice in section.voices {
+                let item = NSMenuItem(title: voice.displayName, action: nil, keyEquivalent: "")
+                item.representedObject = voice.id
+                voicePopup.menu?.addItem(item)
+            }
+        }
+
+        for group in groups {
             let matching = voices.filter { $0.hasPrefix(group.prefix + "_") }
             guard !matching.isEmpty else { continue }
-            if groupIndex > 0, !(voicePopup.menu?.items.isEmpty ?? true) {
+            if !(voicePopup.menu?.items.isEmpty ?? true) {
                 voicePopup.menu?.addItem(.separator())
             }
             let header = NSMenuItem(title: group.title, action: nil, keyEquivalent: "")
@@ -1194,11 +1291,70 @@ private final class VoicesSettingsViewController: NSViewController {
             }
         }
 
+        // Local TTS servers on this Mac (Phonon, Pocket), listed first among the
+        // extras because they are the best-sounding on-device voices.
+        for server in appDelegate.localTTSServers {
+            let prefix = "local:\(server.id):"
+            let sectionVoices = appDelegate.availableVoices.filter { $0.id.hasPrefix(prefix) }
+            guard !sectionVoices.isEmpty else { continue }
+            if !(voicePopup.menu?.items.isEmpty ?? true) {
+                voicePopup.menu?.addItem(.separator())
+            }
+            let header = NSMenuItem(title: "\(server.name) (local)", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            voicePopup.menu?.addItem(header)
+            for voice in sectionVoices {
+                let item = NSMenuItem(title: appDelegate.displayName(for: voice.id), action: nil, keyEquivalent: "")
+                item.representedObject = voice.id
+                voicePopup.menu?.addItem(item)
+            }
+        }
+
+        // Cloud (Cloudflare Workers AI) voices, grouped by model. These send text
+        // off the Mac - the picker labels them; a one-time warning gates first use.
+        let cloudSections: [(title: String, prefix: String)] = [
+            ("Aura-2 (cloud · pro)", "cf:aura-2:"),
+            ("Aura-1 (cloud · pro)", "cf:aura-1:"),
+            ("MeloTTS (cloud · free)", "cf:melotts:"),
+        ]
+        // Without this Mac's own credentials they are shown locked, as a Pro
+        // preview: listed, not selectable, and nothing is sent anywhere.
+        let cloudLocked = !appDelegate.isCloudAvailable
+        let cloudPool = cloudLocked ? CloudVoiceCatalog.voiceInfos : appDelegate.availableVoices
+        for section in cloudSections {
+            let sectionVoices = cloudPool.filter {
+                $0.id.hasPrefix(section.prefix)
+            }
+            guard !sectionVoices.isEmpty else { continue }
+            if !(voicePopup.menu?.items.isEmpty ?? true) {
+                voicePopup.menu?.addItem(.separator())
+            }
+            let title = cloudLocked ? "\(section.title) · coming soon" : section.title
+            let header = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            voicePopup.menu?.addItem(header)
+            for voice in sectionVoices {
+                let item = NSMenuItem(
+                    title: cloudLocked ? voice.displayName : appDelegate.displayName(for: voice.id),
+                    action: nil,
+                    keyEquivalent: ""
+                )
+                if cloudLocked {
+                    item.isEnabled = false  // no representedObject: a locked voice can't be chosen
+                } else {
+                    item.representedObject = voice.id
+                }
+                voicePopup.menu?.addItem(item)
+            }
+        }
+
+        voicePopup.menu?.applyVoiceFavorites()
         if let index = voicePopup.menu?.items.firstIndex(where: {
             ($0.representedObject as? String) == appDelegate.selectedVoiceName
         }) {
             voicePopup.selectItem(at: index)
         }
+        updateFavoriteButton()
         voicePopup.isEnabled = !appDelegate.availableVoices.isEmpty
     }
 
@@ -1221,6 +1377,44 @@ private final class VoicesSettingsViewController: NSViewController {
         let field = NSTextField(labelWithString: title)
         field.font = .systemFont(ofSize: 12, weight: .medium)
         return field
+    }
+
+    private func updateFavoriteButton() {
+        let level = VoiceFavorites.level(for: appDelegate.selectedVoiceName)
+        favoriteButton.image = level?.star ?? FavoriteLevel.star(color: .secondaryLabelColor, filled: false)
+    }
+
+    /// Star (or un-star) the selected voice, keeping the selection on it.
+    private func setFavorite(_ level: FavoriteLevel?) {
+        VoiceFavorites.set(level, for: appDelegate.selectedVoiceName)
+        rebuildVoiceMenu()
+    }
+
+    @objc private func showFavoriteMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let current = VoiceFavorites.level(for: appDelegate.selectedVoiceName)
+        for (index, level) in FavoriteLevel.allCases.enumerated() {
+            let item = NSMenuItem(title: level.title, action: #selector(pickFavorite(_:)), keyEquivalent: "\(index + 1)")
+            item.keyEquivalentModifierMask = []
+            item.target = self
+            item.image = level.star
+            item.tag = level.rawValue
+            item.state = current == level ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let clear = NSMenuItem(title: "Not a favorite", action: #selector(pickFavorite(_:)), keyEquivalent: "0")
+        clear.keyEquivalentModifierMask = []
+        clear.target = self
+        clear.tag = 0
+        clear.isEnabled = current != nil
+        menu.addItem(clear)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+    }
+
+    @objc private func pickFavorite(_ sender: NSMenuItem) {
+        setFavorite(FavoriteLevel(rawValue: sender.tag))
     }
 
     @objc private func changeVoice(_ sender: NSPopUpButton) {
@@ -1258,6 +1452,10 @@ private final class GeneralSettingsViewController: NSViewController {
     private let kokoroCheckbox = NSButton(
         checkboxWithTitle: "Disable Kokoro (frees ~380 MB RAM)", target: nil, action: nil
     )
+    // Kokoro is an optional download (Phonon is the default voice engine).
+    private let kokoroButton = NSButton(title: "Download Kokoro voices (312 MB)", target: nil, action: nil)
+    private let kokoroStatus = NSTextField(labelWithString: "")
+    private var kokoroDownload: Task<Void, Never>?
     private let historyStack = NSStackView()
     private var historyTexts: [String] = []
 
@@ -1293,6 +1491,13 @@ private final class GeneralSettingsViewController: NSViewController {
         content.addArrangedSubview(rememberCheckbox)
         content.addArrangedSubview(continuousCheckbox)
         content.addArrangedSubview(kokoroCheckbox)
+        kokoroButton.target = self
+        kokoroButton.action = #selector(kokoroButtonPressed)
+        kokoroStatus.font = .systemFont(ofSize: 11)
+        kokoroStatus.textColor = .secondaryLabelColor
+        let kokoroRow = NSStackView(views: [kokoroButton, kokoroStatus])
+        kokoroRow.spacing = 10
+        content.addArrangedSubview(kokoroRow)
 
         let rememberHelp = NSTextField(
             wrappingLabelWithString: "Reading history and Dashboard stats are stored locally only when “Remember my reading” is on."
@@ -1366,6 +1571,13 @@ private final class GeneralSettingsViewController: NSViewController {
         kokoroCheckbox.toolTip = needsAlternativeVoice
             ? "Download a Piper or Kitten voice first"
             : nil
+        kokoroCheckbox.isHidden = !appDelegate.isKokoroInstalled
+        if kokoroDownload == nil {
+            kokoroButton.title = appDelegate.isKokoroInstalled
+                ? "Remove Kokoro voices" : "Download Kokoro voices (312 MB)"
+            kokoroStatus.stringValue = appDelegate.isKokoroInstalled
+                ? "" : "The older Kokoro engine. Optional: Phonon is the default."
+        }
         rebuildHistory()
     }
 
@@ -1412,6 +1624,37 @@ private final class GeneralSettingsViewController: NSViewController {
     @objc private func toggleContinuousReading(_ sender: NSButton) {
         appDelegate.setContinuousReading(sender.state == .on)
         refresh()
+    }
+
+    @objc private func kokoroButtonPressed() {
+        if let download = kokoroDownload {
+            download.cancel()
+            return
+        }
+        if appDelegate.isKokoroInstalled {
+            do { try appDelegate.removeKokoro() } catch {
+                kokoroStatus.stringValue = "Could not remove Kokoro: \(error.localizedDescription)"
+            }
+            refresh()
+            return
+        }
+        kokoroButton.title = "Cancel"
+        kokoroStatus.stringValue = "Downloading… 0%"
+        kokoroDownload = Task { @MainActor [weak self] in
+            do {
+                try await self?.appDelegate.downloadKokoro { fraction in
+                    self?.kokoroStatus.stringValue = "Downloading… \(Int(fraction * 100))%"
+                }
+                self?.kokoroDownload = nil
+                self?.refresh()
+            } catch {
+                self?.kokoroDownload = nil
+                self?.refresh()
+                if !(error is CancellationError), (error as? URLError)?.code != .cancelled {
+                    self?.kokoroStatus.stringValue = error.localizedDescription
+                }
+            }
+        }
     }
 
     @objc private func toggleKokoro(_ sender: NSButton) {

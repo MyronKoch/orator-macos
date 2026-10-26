@@ -57,6 +57,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         static let speed = "speed"
         static let autoCast = "autoCast"
         static let kokoroDisabled = "kokoroDisabled"
+        // Set once a saved Kokoro voice has been moved to its Phonon equivalent.
+        static let phononMigrated = "phononMigrated"
+        // Set once the user has opted into cloud voices (which send text off the
+        // Mac). Gates the first cloud-voice selection with a loud warning.
+        static let cloudEgressAcknowledged = "cloudEgressAcknowledged"
         // Set once Accessibility has ever been granted. If we later launch
         // untrusted with this flag set, the TCC entry went stale after a
         // re-signed rebuild - we self-heal it (see healStaleAccessibilityGrant).
@@ -92,6 +97,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         loadEngineAsync()
         registerServices()
+        NotificationCenter.default.addObserver(
+            forName: .oratorFavoritesChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.rebuildMenu() }
+        }
 
         // If a prior grant went stale after a re-signed rebuild, clear the dead
         // TCC entry BEFORE the trust check so the onboarding prompt can re-add a
@@ -195,27 +205,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Engine
 
+    /// The saved global voice, or the engine's default. The first time Phonon is
+    /// present, a saved Kokoro voice moves to its Phonon equivalent (Phonon
+    /// replaced Kokoro as the default on 2026-10-21); after that the choice is
+    /// left alone, so picking a Kokoro voice again sticks.
+    private func launchVoice(for engine: OratorEngine) -> String {
+        guard let saved = defaults.string(forKey: Pref.voice) else { return engine.defaultVoice }
+        guard engine.isPhononAvailable, !defaults.bool(forKey: Pref.phononMigrated) else { return saved }
+        defaults.set(true, forKey: Pref.phononMigrated)
+        guard let mapped = PhononProvider.voiceID(forKokoro: saved) else { return saved }
+        defaults.set(mapped, forKey: Pref.voice)
+        oratorLog("voice: migrated \(saved) -> \(mapped)")
+        return mapped
+    }
+
     private func loadEngineAsync() {
-        guard let modelPath = Bundle.main.url(forResource: "kokoro-v1_0", withExtension: "safetensors"),
-              let voicesPath = Bundle.main.url(forResource: "voices", withExtension: "npz") else {
+        guard let voicesPath = Bundle.main.url(forResource: "voices", withExtension: "npz") else {
             engineError = "Model files missing from app bundle"
             rebuildMenu()
             return
         }
+        // Kokoro is an optional download now. Older builds bundled it, so a model
+        // inside the app still counts.
+        let kokoroPath = KokoroDownloader.isInstalled
+            ? KokoroDownloader.installedURL
+            : Bundle.main.url(forResource: "kokoro-v1_0", withExtension: "safetensors")
+        let loadKokoro = !defaults.bool(forKey: Pref.kokoroDisabled)
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                let engine = try OratorEngine(modelPath: modelPath, voicesPath: voicesPath)
+                let engine = OratorEngine(kokoroModelPath: kokoroPath, voicesPath: voicesPath, loadKokoro: loadKokoro)
                 engine.warmUp()
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     self.engine = engine
                     self.timeline = SpeechTimeline(engine: engine)
-                    engine.currentVoice = self.defaults.string(forKey: Pref.voice) ?? "af_heart"
-                    if self.defaults.bool(forKey: Pref.kokoroDisabled),
-                       self.hasNonKokoroVoiceInstalled {
-                        self.setKokoroDisabled(true)
-                    }
+                    engine.currentVoice = self.launchVoice(for: engine)
                     let savedSpeed = self.defaults.float(forKey: Pref.speed)
                     engine.speed = savedSpeed > 0 ? savedSpeed : 1.0
                     self.continuousReading = self.defaults.object(forKey: Pref.continuousReading) == nil
@@ -395,7 +420,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             oratorLog("capture: got \(text.count) chars — speaking")
 
-            let globalVoice = self.defaults.string(forKey: Pref.voice) ?? "af_heart"
+            let globalVoice = self.defaults.string(forKey: Pref.voice) ?? engine.defaultVoice
             let savedSpeed = self.defaults.float(forKey: Pref.speed)
             let globalSpeed = savedSpeed == 0 ? Float(1.0) : savedSpeed
             if let bundleID = readApp?.bundleID,
@@ -454,10 +479,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var statsSnapshot: ReadingStatsSnapshot { stats.snapshot() }
     var reading: ReadingStats { stats }
 
+    // MARK: - Timeline editor bridge
+
+    /// The timeline editor needs the engine to render and play a mixdown, but
+    /// `engine` stays private like every other consumer here - these are the
+    /// narrow accessors it actually uses.
+    func makeTimelineAudio() -> TimelineAudio? {
+        engine.map { TimelineAudio(engine: $0) }
+    }
+
+    /// Play a pre-mixed timeline buffer, optionally starting partway in so a
+    /// click on the timeline can seek during playback.
+    func playTimelineMix(_ samples: [Float], fromMS: Int = 0) throws {
+        guard let engine else {
+            throw NSError(
+                domain: "Orator.Timeline", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "The speech engine is still loading"]
+            )
+        }
+        _ = try engine.playMixedBuffer(samples, fromMS: fromMS)
+    }
+
+    func stopTimelinePlayback() { engine?.stop() }
+
+    /// Seconds into the current utterance, or nil when idle - drives the playhead.
+    var playbackPositionSeconds: TimeInterval? { engine?.playbackPosition }
+
+    var isEnginePlaying: Bool { engine?.isSpeaking ?? false }
+
     // MARK: - Orator window settings bridge
 
+    var localTTSServers: [(id: String, name: String)] { engine?.localServers ?? [] }
+    /// Pocket's base URL when it is running - the clone sheet posts here.
+    var pocketServerURL: URL? { engine?.localServerURL("pocket") }
+    /// Pull new voice lists from the local servers and rebuild the voice menus.
+    func refreshLocalVoices() {
+        engine?.refreshLocalVoices()
+        rebuildMenu()
+        oratorWindowController?.refresh()
+    }
     var availableVoiceNames: [String] { engine?.voiceNames ?? [] }
     var availableVoices: [VoiceInfo] { engine?.availableVoices ?? [] }
+    func isPhononCharacter(_ voiceID: String) -> Bool { engine?.isPhononCharacter(voiceID) ?? false }
+    /// Cloud voices are a Pro feature: without this Mac's own Cloudflare credentials
+    /// they are listed but locked.
+    var isCloudAvailable: Bool { engine?.isCloudAvailable ?? false }
     var hasNonKokoroVoiceInstalled: Bool {
         (engine?.availableVoices ?? []).contains {
             VoiceInfo.providerID(of: $0.id) != nil
@@ -516,6 +582,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Remove a downloaded voice model: free any RAM it held, delete it from
+    /// disk, and - if the active voice belonged to it - fall back to a still-
+    /// usable voice so the app is never left pointing at a deleted or
+    /// unspeakable voice.
+    @discardableResult
+    func removeCatalogModel(_ model: CatalogModel) -> Bool {
+        guard let engine else { return false }
+        let removedIDs = Set(model.voices.map {
+            VoiceInfo.namespaced(provider: model.engine, local: $0.localID)
+        })
+
+        // Re-home the active voice BEFORE deleting, so any in-flight synthesis
+        // using this model is stopped and currentVoice never dangles.
+        if removedIDs.contains(selectedVoiceName) {
+            let fallback: String
+            if engine.isKokoroEnabled {
+                fallback = "af_heart"
+            } else if let other = engine.availableVoices.first(where: {
+                !removedIDs.contains($0.id)
+            }) {
+                fallback = other.id
+            } else {
+                // No non-Kokoro voice would remain and Kokoro is off - turn it
+                // back on so the app always has something to speak with.
+                engine.setKokoroEnabled(true)
+                defaults.set(false, forKey: Pref.kokoroDisabled)
+                fallback = "af_heart"
+            }
+            setSelectedVoice(fallback)
+        }
+
+        let removed = engine.uninstall(model)
+        engine.reloadCatalog()
+        rebuildMenu()
+        oratorWindowController?.refresh()
+        return removed
+    }
+
     func isInstalled(_ model: CatalogModel) -> Bool {
         engine?.isInstalled(model) ?? false
     }
@@ -526,11 +630,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func setSelectedVoice(_ name: String) {
         guard let engine, engine.canSpeak(voiceID: name) else { return }
+        // Cloud voices send your text off the Mac - gate the first one with a
+        // loud, one-time opt-in. Declining leaves the current voice unchanged.
+        if VoiceInfo.providerID(of: name) == "cf", !confirmCloudEgressIfNeeded() { return }
         queuePlaybackActive = false
         engine.stop()
         engine.currentVoice = name
         defaults.set(name, forKey: Pref.voice)
         rebuildMenu()
+    }
+
+    /// One-time data-egress warning before the first cloud-voice use. Cloud
+    /// voices are the deliberate exception to Orator's on-device promise: the
+    /// text you read is sent to Cloudflare/Deepgram. Returns true to proceed.
+    private func confirmCloudEgressIfNeeded() -> Bool {
+        if defaults.bool(forKey: Pref.cloudEgressAcknowledged) { return true }
+        let alert = NSAlert()
+        alert.messageText = "Cloud voices send your text off your Mac"
+        alert.informativeText = """
+        You picked a CLOUD voice. Every time you use it, the text you're reading \
+        is sent over the internet to Cloudflare and Deepgram to be turned into \
+        speech. It does NOT stay on your Mac like Orator's built-in voices.
+
+        Do not use cloud voices for anything private or sensitive. Continue?
+        """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Use Cloud Voices")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        defaults.set(true, forKey: Pref.cloudEgressAcknowledged)
+        return true
     }
 
     func setKokoroDisabled(_ disabled: Bool) {
@@ -547,6 +676,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             engine?.setKokoroEnabled(true)
         }
         defaults.set(disabled, forKey: Pref.kokoroDisabled)
+        rebuildMenu()
+        oratorWindowController?.refresh()
+    }
+
+    var isKokoroInstalled: Bool { engine?.isKokoroInstalled ?? false }
+
+    /// Download the optional Kokoro voices, then load them (unless the user
+    /// has Kokoro switched off).
+    func downloadKokoro(progress: @escaping @MainActor @Sendable (Double) -> Void) async throws {
+        let url = try await KokoroDownloader.download(progress: progress)
+        engine?.installKokoro(modelPath: url, load: !defaults.bool(forKey: Pref.kokoroDisabled))
+        rebuildMenu()
+        oratorWindowController?.refresh()
+    }
+
+    /// Delete the downloaded Kokoro model. A selected Kokoro voice keeps working:
+    /// it plays as its Phonon equivalent.
+    func removeKokoro() throws {
+        engine?.uninstallKokoro()
+        try KokoroDownloader.remove()
         rebuildMenu()
         oratorWindowController?.refresh()
     }
@@ -1047,16 +1196,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         let voices = availableVoiceNames
         let groups: [(title: String, prefix: String)] = [
-            ("US · Female", "af"),
-            ("US · Male", "am"),
-            ("UK · Female", "bf"),
-            ("UK · Male", "bm"),
+            ("Kokoro · US Female", "af"),
+            ("Kokoro · US Male", "am"),
+            ("Kokoro · UK Female", "bf"),
+            ("Kokoro · UK Male", "bm"),
         ]
 
-        for (groupIndex, group) in groups.enumerated() {
+        // Phonon, the default engine, first: narrators, then character voices.
+        let phononVoices = availableVoices.filter { $0.provider == "phonon" }
+        let phononSections: [(title: String, voices: [VoiceInfo])] = [
+            ("Phonon", phononVoices.filter { !isPhononCharacter($0.id) }),
+            ("Phonon · Characters", phononVoices.filter { isPhononCharacter($0.id) }),
+        ]
+        for section in phononSections where !section.voices.isEmpty {
+            if !menu.items.isEmpty {
+                menu.addItem(.separator())
+            }
+            let header = NSMenuItem(title: section.title, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for voice in section.voices {
+                let item = NSMenuItem(title: voice.displayName, action: #selector(selectVoice(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = voice.id
+                item.state = voice.id == selectedVoiceName ? .on : .off
+                menu.addItem(item)
+            }
+        }
+
+        for group in groups {
             let matching = voices.filter { $0.hasPrefix(group.prefix + "_") }
             guard !matching.isEmpty else { continue }
-            if groupIndex > 0, !menu.items.isEmpty {
+            if !menu.items.isEmpty {
                 menu.addItem(.separator())
             }
             let header = NSMenuItem(title: group.title, action: nil, keyEquivalent: "")
@@ -1127,6 +1298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        menu.applyVoiceFavorites()
         return menu
     }
 

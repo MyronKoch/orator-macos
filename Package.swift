@@ -14,6 +14,9 @@ let package = Package(
         // framework, no mlx-swift dependency, so it resolves cleanly alongside
         // KokoroSwift's exact 0.30.2 pin.
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
+        // Phonon TTS (Gradium, Apache-2.0). No SwiftPM dependencies of its own - a prebuilt
+        // binary core plus Apple frameworks - so it cannot disturb the exact mlx-swift pin.
+        .package(url: "https://github.com/gradium-ai/xn-ptts.git", exact: "0.4.0"),
     ],
     targets: [
         // sherpa-onnx ONNX voice engine, delivered as prebuilt STATIC
@@ -22,10 +25,16 @@ let package = Package(
         // and carry no mlx-swift dependency, so the exact 0.30.2 pin is
         // untouched. The wrapper lives in Sources/Orator/SherpaOnnx.swift and
         // imports the `SherpaOnnxC` module vended by the sherpa xcframework.
+        //
+        // sherpa is the one exception to "pulled by URL": scripts/vendor-sherpa.sh
+        // fetches the same checksum-pinned zip and nests its headers under
+        // Headers/SherpaOnnxC/, because PhononCore.xcframework also ships a
+        // top-level Headers/module.modulemap and Xcode copies both into one
+        // include/ directory ("Multiple commands produce ... module.modulemap").
+        // Vendor/ is gitignored; build-app.sh runs the script first.
         .binaryTarget(
             name: "SherpaOnnxMacOS",
-            url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.4/sherpa-onnx-v1.13.4-macos.xcframework.zip",
-            checksum: "4325d8aed99b94be58969005b19f9626f3f3afc4ebd42378b0aad2b84e233552"
+            path: "Vendor/sherpa-onnx.xcframework"
         ),
         .binaryTarget(
             name: "OnnxruntimeMacOS",
@@ -39,6 +48,7 @@ let package = Package(
                 .product(name: "MLXUtilsLibrary", package: "MLXUtilsLibrary"),
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "Sparkle", package: "Sparkle"),
+                .product(name: "ptts", package: "xn-ptts"),
                 "SherpaOnnxMacOS",
                 "OnnxruntimeMacOS",
             ],

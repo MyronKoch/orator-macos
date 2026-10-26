@@ -24,6 +24,32 @@ final class ScriptSettingsViewController: NSViewController,
     private let skipHeadings = NSButton(checkboxWithTitle: "Skip scene headings", target: nil, action: nil)
     private let skipParentheticals = NSButton(checkboxWithTitle: "Skip parentheticals", target: nil, action: nil)
     private let skipTransitions = NSButton(checkboxWithTitle: "Skip transitions", target: nil, action: nil)
+    private let timelineView = TimelineView()
+    private lazy var timelineAudio: TimelineAudio? = appDelegate.makeTimelineAudio()
+    private var timelineScrollView: NSScrollView
+    private var playheadTimer: Timer?
+    /// Where the currently-playing buffer starts on the timeline. The engine
+    /// reports position within the buffer it was handed, so this offset turns
+    /// that back into an absolute timeline position after a seek.
+    private var timelinePlaybackOriginMS = 0
+    private var isRenderingTimeline = false
+    private var timelineRenderID: UUID?
+    private let buildTimelineButton = NSButton(title: "Build Timeline", target: nil, action: nil)
+    private let openTimelineEditorButton = NSButton(title: "Open Editor", target: nil, action: nil)
+    private var timelineEditorWindowController: TimelineEditorWindowController?
+    private let timelineRangePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private var timelineRangeLimit = 0
+    private let startTimelineButton = NSButton(title: "<< Start", target: nil, action: nil)
+    private let backFiveTimelineButton = NSButton(title: "<< 5s", target: nil, action: nil)
+    private let playTimelineButton = NSButton(title: "Play", target: nil, action: nil)
+    private let stopTimelineButton = NSButton(title: "Stop", target: nil, action: nil)
+    private let forwardFiveTimelineButton = NSButton(title: "5s >>", target: nil, action: nil)
+    private let endTimelineButton = NSButton(title: "End >>", target: nil, action: nil)
+    private let timelinePositionLabel = NSTextField(labelWithString: "0:00 / 0:00")
+    private let exportTimelineButton = NSButton(title: "Export Audio…", target: nil, action: nil)
+    private let zoomInTimelineButton = NSButton(title: "+", target: nil, action: nil)
+    private let zoomOutTimelineButton = NSButton(title: "-", target: nil, action: nil)
+    private let timelineStatus = NSTextField(labelWithString: "")
 
     private var elements: [ScriptElement] = []
     private var characterNames: [String] = []
@@ -32,6 +58,7 @@ final class ScriptSettingsViewController: NSViewController,
 
     init(appDelegate: AppDelegate) {
         self.appDelegate = appDelegate
+        timelineScrollView = NSScrollView()
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -134,6 +161,139 @@ final class ScriptSettingsViewController: NSViewController,
         playButton.bezelStyle = .rounded
         playButton.keyEquivalent = "\r"
 
+        let timelineHeading = NSTextField(labelWithString: "Timeline")
+        timelineHeading.font = .systemFont(ofSize: 15, weight: .semibold)
+        buildTimelineButton.target = self
+        buildTimelineButton.action = #selector(buildTimeline)
+        openTimelineEditorButton.target = self
+        openTimelineEditorButton.action = #selector(openTimelineEditor)
+        let rangeLabel = NSTextField(labelWithString: "Range")
+        for (title, tag) in [
+            ("Whole script", 0),
+            ("First 25 lines", 25),
+            ("First 50 lines", 50),
+            ("First 100 lines", 100),
+            ("First 200 lines", 200),
+        ] {
+            timelineRangePopup.addItem(withTitle: title)
+            timelineRangePopup.lastItem?.tag = tag
+        }
+        timelineRangePopup.target = self
+        timelineRangePopup.action = #selector(changeTimelineRange(_:))
+        startTimelineButton.target = self
+        startTimelineButton.action = #selector(jumpTimelineToStart)
+        backFiveTimelineButton.target = self
+        backFiveTimelineButton.action = #selector(skipTimelineBackward)
+        playTimelineButton.target = self
+        playTimelineButton.action = #selector(toggleTimelinePlayback)
+        stopTimelineButton.target = self
+        stopTimelineButton.action = #selector(stopTimeline)
+        forwardFiveTimelineButton.target = self
+        forwardFiveTimelineButton.action = #selector(skipTimelineForward)
+        endTimelineButton.target = self
+        endTimelineButton.action = #selector(jumpTimelineToEnd)
+        configureTransportButton(
+            startTimelineButton,
+            symbolName: "backward.end.fill",
+            fallbackTitle: "<< Start",
+            accessibilityDescription: "Jump to start"
+        )
+        configureTransportButton(
+            backFiveTimelineButton,
+            symbolName: "gobackward.5",
+            fallbackTitle: "<< 5s",
+            accessibilityDescription: "Move playhead back 5 seconds"
+        )
+        configureTransportButton(
+            stopTimelineButton,
+            symbolName: "stop.fill",
+            fallbackTitle: "Stop",
+            accessibilityDescription: "Stop"
+        )
+        configureTransportButton(
+            forwardFiveTimelineButton,
+            symbolName: "goforward.5",
+            fallbackTitle: "5s >>",
+            accessibilityDescription: "Move playhead forward 5 seconds"
+        )
+        configureTransportButton(
+            endTimelineButton,
+            symbolName: "forward.end.fill",
+            fallbackTitle: "End >>",
+            accessibilityDescription: "Jump to end"
+        )
+        timelinePositionLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        timelinePositionLabel.alignment = .right
+        timelinePositionLabel.setContentHuggingPriority(.required, for: .horizontal)
+        exportTimelineButton.target = self
+        exportTimelineButton.action = #selector(exportTimeline)
+        zoomInTimelineButton.target = self
+        zoomInTimelineButton.action = #selector(zoomInTimeline)
+        zoomOutTimelineButton.target = self
+        zoomOutTimelineButton.action = #selector(zoomOutTimeline)
+        timelineStatus.font = .systemFont(ofSize: 11)
+        timelineStatus.textColor = .secondaryLabelColor
+        timelineStatus.lineBreakMode = .byTruncatingTail
+        timelineStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let timelineHeader = NSStackView(views: [
+            buildTimelineButton,
+            openTimelineEditorButton,
+            rangeLabel,
+            timelineRangePopup,
+            exportTimelineButton,
+            zoomInTimelineButton,
+            zoomOutTimelineButton,
+            timelineStatus,
+        ])
+        timelineHeader.orientation = .horizontal
+        timelineHeader.alignment = .centerY
+        timelineHeader.spacing = 8
+        let timelineTransport = NSStackView(views: [
+            startTimelineButton,
+            backFiveTimelineButton,
+            playTimelineButton,
+            stopTimelineButton,
+            forwardFiveTimelineButton,
+            endTimelineButton,
+            timelinePositionLabel,
+        ])
+        timelineTransport.orientation = .horizontal
+        timelineTransport.alignment = .centerY
+        timelineTransport.spacing = 8
+
+        timelineView.envelopeProvider = { [weak self] clip, buckets in
+            self?.timelineAudio?.envelope(for: clip, buckets: buckets) ?? []
+        }
+        timelineView.onTimelineChanged = { [weak self] updated in
+            self?.timelineChanged(updated)
+        }
+        timelineView.onScrub = { [weak self] ms in
+            guard let self else { return }
+            self.setTimelinePlayhead(ms)
+            // Clicking the ruler WHILE PLAYING jumps there and keeps going, the
+            // behaviour every editor has. When stopped it just parks the head.
+            if self.appDelegate.isEnginePlaying {
+                self.playTimeline(fromMS: ms)
+            }
+        }
+        timelineView.onEditClip = { [weak self] id in
+            self?.editClip(id)
+        }
+        timelineView.onTogglePlayback = { [weak self] in
+            self?.toggleTimelinePlayback()
+        }
+        timelineScrollView.hasHorizontalScroller = true
+        timelineScrollView.hasVerticalScroller = true
+        timelineScrollView.borderType = .bezelBorder
+        timelineScrollView.documentView = timelineView
+        timelineView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            timelineView.leadingAnchor.constraint(equalTo: timelineScrollView.contentView.leadingAnchor),
+            timelineView.topAnchor.constraint(equalTo: timelineScrollView.contentView.topAnchor),
+            timelineView.widthAnchor.constraint(greaterThanOrEqualTo: timelineScrollView.contentView.widthAnchor),
+            timelineView.heightAnchor.constraint(greaterThanOrEqualTo: timelineScrollView.contentView.heightAnchor),
+        ])
+
         content.addArrangedSubview(heading)
         content.addArrangedSubview(helper)
         content.addArrangedSubview(sourceButtons)
@@ -147,18 +307,34 @@ final class ScriptSettingsViewController: NSViewController,
         content.addArrangedSubview(overallStack)
         content.addArrangedSubview(languageWarning)
         content.addArrangedSubview(playButton)
+        content.setCustomSpacing(16, after: playButton)
+        content.addArrangedSubview(timelineHeading)
+        content.addArrangedSubview(timelineHeader)
+        content.addArrangedSubview(timelineTransport)
+        content.addArrangedSubview(timelineScrollView)
 
-        for fullWidth in [helper, textScroll, statusLabel, tableScroll, languageWarning] {
+        for fullWidth in [
+            helper, textScroll, statusLabel, tableScroll, languageWarning,
+            timelineHeader, timelineTransport, timelineScrollView,
+        ] {
             fullWidth.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         }
         textScroll.heightAnchor.constraint(equalToConstant: 170).isActive = true
         tableScroll.heightAnchor.constraint(equalToConstant: 190).isActive = true
+        timelineScrollView.heightAnchor.constraint(equalToConstant: 240).isActive = true
 
         view = makeSettingsScrollView(
             hosting: content,
             insets: NSEdgeInsets(top: 24, left: 26, bottom: 28, right: 26)
         )
+        updateTimelineControls()
         refresh()
+    }
+
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        playheadTimer?.invalidate()
+        playheadTimer = nil
     }
 
     func refresh() {
@@ -167,6 +343,7 @@ final class ScriptSettingsViewController: NSViewController,
         overallSpeedSlider.floatValue = ScriptCast.clamp(cast.overallSpeed)
         updateOverallSpeedLabel()
         updateState()
+        updateTimelineControls()
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { characterNames.count + 1 }
@@ -466,5 +643,348 @@ final class ScriptSettingsViewController: NSViewController,
         } catch {
             statusLabel.stringValue = "Couldn’t start playback: \(error.localizedDescription)"
         }
+    }
+
+    @objc private func buildTimeline() {
+        if isRenderingTimeline {
+            cancelTimelineRender()
+            return
+        }
+
+        let options = ScriptCaster.Options(
+            readSceneHeadings: skipHeadings.state != .on,
+            readParentheticals: skipParentheticals.state != .on,
+            readTransitions: skipTransitions.state != .on,
+            mergeConsecutive: false
+        )
+        let allSegments = ScriptCaster.cast(elements: elements, cast: cast, options: options)
+        guard !allSegments.isEmpty else {
+            timelineStatus.stringValue = "Nothing to lay out with the current cast."
+            return
+        }
+
+        let segments: [SpeechSegment]
+        let renderingDescription: String
+        if timelineRangeLimit > 0 {
+            segments = Array(allSegments.prefix(timelineRangeLimit))
+            renderingDescription = "Rendering first \(segments.count) of \(allSegments.count) lines"
+        } else {
+            segments = allSegments
+            renderingDescription = "Rendering \(segments.count) lines"
+        }
+
+        let built = Timeline.fromCast(segments: segments)
+        timelineView.timeline = built
+        timelineEditorWindowController?.updateTimeline(built)
+        setTimelinePlayhead(0)
+        renderTimeline(built, initialBuild: true, description: renderingDescription)
+    }
+
+    @objc private func openTimelineEditor() {
+        if timelineEditorWindowController == nil {
+            timelineEditorWindowController = TimelineEditorWindowController(
+                timeline: timelineView.timeline,
+                envelopeProvider: { [weak self] clip, buckets in
+                    self?.timelineAudio?.envelope(for: clip, buckets: buckets) ?? []
+                },
+                onTimelineChanged: { [weak self] updated in
+                    self?.timelineView.timeline = updated
+                    self?.updateTimelineControls()
+                },
+                onPlay: { [weak self] ms in
+                    self?.playTimeline(fromMS: ms)
+                },
+                onStop: { [weak self] in
+                    self?.stopTimeline()
+                },
+                isPlaying: { [weak self] in
+                    self?.appDelegate.isEnginePlaying ?? false
+                },
+                playheadMS: { [weak self] in
+                    self?.timelineView.playheadMS ?? 0
+                }
+            )
+        }
+        timelineEditorWindowController?.updateTimeline(timelineView.timeline)
+        timelineEditorWindowController?.updatePlayhead(timelineView.playheadMS)
+        timelineEditorWindowController?.show()
+    }
+
+    private func renderTimeline(
+        _ timeline: Timeline,
+        initialBuild: Bool,
+        description: String
+    ) {
+        let renderID = UUID()
+        timelineRenderID = renderID
+        isRenderingTimeline = true
+        timelineStatus.stringValue = "\(description)..."
+        updateTimelineControls()
+
+        guard let timelineAudio else {
+            timelineRenderID = nil
+            isRenderingTimeline = false
+            timelineStatus.stringValue = "Audio engine is unavailable."
+            updateTimelineControls()
+            return
+        }
+
+        timelineAudio.render(timeline) { [weak self] fraction in
+            guard let self, self.timelineRenderID == renderID else { return }
+            self.timelineStatus.stringValue = "\(description)... \(Int(fraction * 100))%"
+        } completion: { [weak self] rendered, cancelled in
+            guard let self, self.timelineRenderID == renderID else { return }
+            self.timelineRenderID = nil
+            self.isRenderingTimeline = false
+
+            if cancelled {
+                let ready = rendered.clips.filter {
+                    timelineAudio.cachedSamples(for: $0) != nil
+                }.count
+                self.timelineStatus.stringValue = "Render cancelled. \(ready) of \(rendered.clips.count) clips ready."
+                self.updateTimelineControls()
+                return
+            }
+
+            var finished = rendered
+            if initialBuild {
+                finished.relayoutSequentially()
+            }
+            self.timelineView.timeline = finished
+            self.timelineEditorWindowController?.updateTimeline(finished)
+            self.setTimelinePlayhead(min(self.timelineView.playheadMS, finished.totalDurationMS))
+            if initialBuild {
+                self.timelineView.zoomToFit(width: self.timelineScrollView.contentSize.width)
+            }
+            self.timelineStatus.stringValue = "Ready. \(finished.clips.count) clips, \(Self.durationText(finished.totalDurationMS))."
+            self.updateTimelineControls()
+        }
+    }
+
+    private func cancelTimelineRender() {
+        guard isRenderingTimeline else { return }
+        timelineAudio?.cancelRender()
+        isRenderingTimeline = false
+        timelineStatus.stringValue = "Cancelling render..."
+        updateTimelineControls()
+    }
+
+    @objc private func changeTimelineRange(_ sender: NSPopUpButton) {
+        timelineRangeLimit = sender.selectedItem?.tag ?? 0
+    }
+
+    @objc private func toggleTimelinePlayback() {
+        if appDelegate.isEnginePlaying {
+            stopTimeline()
+        } else {
+            playTimeline()
+        }
+    }
+
+    @objc private func playTimeline() {
+        playTimeline(fromMS: timelineView.playheadMS)
+    }
+
+    /// Start (or restart) playback at `fromMS`. Restarting from a new offset is
+    /// how seeking works: the mixdown is one contiguous buffer, so a click during
+    /// playback re-schedules from that frame and carries on.
+    private func playTimeline(fromMS: Int) {
+        guard let audio = timelineAudio else { return }
+        let samples = audio.mixdown(timelineView.timeline)
+        guard !samples.isEmpty else {
+            timelineStatus.stringValue = "Nothing to play. Build the timeline first."
+            return
+        }
+        let total = timelineView.timeline.totalDurationMS
+        // Starting at (or past) the end would play nothing - wrap to the top so
+        // pressing play with the head parked at the end still reads the piece.
+        let start = (fromMS >= total) ? 0 : max(0, fromMS)
+        do {
+            try appDelegate.playTimelineMix(samples, fromMS: start)
+        } catch {
+            timelineStatus.stringValue = "Couldn't start playback: \(error.localizedDescription)"
+            updateTimelineControls()
+            return
+        }
+
+        timelinePlaybackOriginMS = start
+        setTimelinePlayhead(start)
+        updateTimelineControls()
+        playheadTimer?.invalidate()
+        // Never touch the Timer parameter inside the isolated block: Timer is not
+        // Sendable, so passing it across the MainActor boundary is a data race in
+        // Swift 6. The MainActor-isolated `playheadTimer` property is the same
+        // object and is safe to use, so stop via that instead. The VC invalidates
+        // it on disappear/deinit, which covers the deallocated-self case.
+        let timer = Timer(timeInterval: 0.03, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                // playbackPosition is relative to the buffer we scheduled, which
+                // starts at the seek point - add it back for the true position.
+                self.setTimelinePlayhead(self.timelinePlaybackOriginMS + Int(
+                    (self.appDelegate.playbackPositionSeconds ?? 0) * 1000
+                ))
+                if !self.appDelegate.isEnginePlaying {
+                    self.playheadTimer?.invalidate()
+                    self.playheadTimer = nil
+                    self.updateTimelineControls()
+                }
+            }
+        }
+        playheadTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @objc private func stopTimeline() {
+        appDelegate.stopTimelinePlayback()
+        timelineAudio?.cancelRender()
+        if isRenderingTimeline {
+            isRenderingTimeline = false
+            timelineStatus.stringValue = "Cancelling render..."
+        }
+        playheadTimer?.invalidate()
+        playheadTimer = nil
+        updateTimelineControls()
+    }
+
+    // Playback is a single pre-mixed buffer that always starts at zero. These
+    // controls move only the stopped timeline marker; they do not seek audio.
+    @objc private func jumpTimelineToStart() {
+        setTimelinePlayhead(0)
+    }
+
+    @objc private func skipTimelineBackward() {
+        setTimelinePlayhead(timelineView.playheadMS - 5_000)
+    }
+
+    @objc private func skipTimelineForward() {
+        setTimelinePlayhead(timelineView.playheadMS + 5_000)
+    }
+
+    @objc private func jumpTimelineToEnd() {
+        setTimelinePlayhead(timelineView.timeline.totalDurationMS)
+    }
+
+    @objc private func exportTimeline() {
+        guard let audio = timelineAudio, let window = view.window else { return }
+        let timeline = timelineView.timeline
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.mpeg4Audio]
+        panel.nameFieldStringValue = "Table Read.m4a"
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else { return }
+            audio.export(timeline, to: url) { [weak self] result in
+                switch result {
+                case .success(let url):
+                    self?.timelineStatus.stringValue = "Exported to \(url.lastPathComponent)"
+                case .failure(let error):
+                    self?.timelineStatus.stringValue = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    @objc private func zoomInTimeline() {
+        timelineView.zoomIn()
+    }
+
+    @objc private func zoomOutTimeline() {
+        timelineView.zoomOut()
+    }
+
+    private func configureTransportButton(
+        _ button: NSButton,
+        symbolName: String,
+        fallbackTitle: String,
+        accessibilityDescription: String
+    ) {
+        if let image = NSImage(
+            systemSymbolName: symbolName,
+            accessibilityDescription: accessibilityDescription
+        ) {
+            button.image = image
+            button.imagePosition = .imageOnly
+            button.title = ""
+        } else {
+            button.image = nil
+            button.imagePosition = .noImage
+            button.title = fallbackTitle
+        }
+        button.toolTip = accessibilityDescription
+        button.setAccessibilityLabel(accessibilityDescription)
+    }
+
+    private func updateTimelineControls() {
+        let hasTimeline = !timelineView.timeline.clips.isEmpty
+        let isPlaying = appDelegate.isEnginePlaying
+        let transportEnabled = hasTimeline && !isRenderingTimeline
+        let markerControlsEnabled = transportEnabled && !isPlaying
+
+        buildTimelineButton.title = isRenderingTimeline ? "Cancel Render" : "Build Timeline"
+        buildTimelineButton.isEnabled = true
+        timelineRangePopup.isEnabled = !isRenderingTimeline
+        exportTimelineButton.isEnabled = transportEnabled
+        openTimelineEditorButton.isEnabled = hasTimeline
+        zoomInTimelineButton.isEnabled = transportEnabled
+        zoomOutTimelineButton.isEnabled = transportEnabled
+        startTimelineButton.isEnabled = markerControlsEnabled
+        backFiveTimelineButton.isEnabled = markerControlsEnabled
+        forwardFiveTimelineButton.isEnabled = markerControlsEnabled
+        endTimelineButton.isEnabled = markerControlsEnabled
+        playTimelineButton.isEnabled = transportEnabled
+        stopTimelineButton.isEnabled = isRenderingTimeline || isPlaying
+
+        configureTransportButton(
+            playTimelineButton,
+            symbolName: isPlaying ? "pause.fill" : "play.fill",
+            fallbackTitle: isPlaying ? "Pause" : "Play",
+            accessibilityDescription: isPlaying ? "Pause" : "Play"
+        )
+        updateTimelinePositionLabel()
+    }
+
+    private func setTimelinePlayhead(_ milliseconds: Int) {
+        timelineView.playheadMS = min(
+            max(0, milliseconds),
+            max(0, timelineView.timeline.totalDurationMS)
+        )
+        timelineEditorWindowController?.updatePlayhead(timelineView.playheadMS)
+        updateTimelinePositionLabel()
+    }
+
+    private func updateTimelinePositionLabel() {
+        let duration = max(0, timelineView.timeline.totalDurationMS)
+        let playhead = min(max(0, timelineView.playheadMS), duration)
+        timelinePositionLabel.stringValue = "\(Self.durationText(playhead)) / \(Self.durationText(duration))"
+    }
+
+    private func timelineChanged(_ updated: Timeline) {
+        timelineEditorWindowController?.updateTimeline(updated)
+        timelineStatus.stringValue = "\(updated.clips.count) clips, \(Self.durationText(updated.totalDurationMS))."
+        setTimelinePlayhead(min(timelineView.playheadMS, updated.totalDurationMS))
+        updateTimelineControls()
+    }
+
+    private func editClip(_ id: UUID) {
+        guard var clip = timelineView.timeline.clip(id: id) else { return }
+        let alert = NSAlert()
+        alert.messageText = "Edit Timeline Clip"
+        alert.informativeText = "Edit the text spoken by this clip."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        field.stringValue = clip.text
+        alert.accessoryView = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        clip.text = field.stringValue
+        timelineView.timeline.update(clip)
+        let edited = timelineView.timeline
+        renderTimeline(edited, initialBuild: false, description: "Rendering edited clip")
+    }
+
+    private static func durationText(_ durationMS: Int) -> String {
+        let totalSeconds = max(0, durationMS) / 1000
+        return String(format: "%d:%02d", totalSeconds / 60, totalSeconds % 60)
     }
 }
