@@ -11,3 +11,6 @@ branding/icon-master.png
 
 # Repackaged binary frameworks (scripts/vendor-sherpa.sh)
 Vendor/
+
+# Private notes (competitive intel, strategy): never pushed
+private/
