@@ -79,4 +79,4 @@ provider-picker UI.
 ## Sources
 - resemble-ai/chatterbox (MIT), HF `ResembleAI/chatterbox`, Chatterbox Multilingual v3 (23 langs, Perth
   watermark), mlx-audio (Blaizzy), speech-swift (soniqo, MLX Swift + CoreML), Chatterbox Apple-Silicon
-  builds. See docs/competitive-landscape.md for the surrounding market context.
+  builds.
