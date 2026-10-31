@@ -1,4 +1,5 @@
 import Foundation
+import NaturalLanguage
 import PhononTTS
 
 /// Phonon 31M (Gradium, Apache-2.0) behind the `TTSProvider` seam - Orator's
@@ -151,8 +152,17 @@ final class PhononProvider: TTSProvider, @unchecked Sendable {
         if tts.voice != name {
             try Self.blocking { try await tts.setVoice(name) }
         }
-        var samples = try Self.blocking { try await tts.synthesize(text) }
-        Self.fadeInRestarts(&samples)
+        // Sentence by sentence, so each pause can fit its sentence instead of
+        // Phonon's one fixed half-second gap (Myron preferred this by ear,
+        // 2026-10-31). Phonon restarts per sentence internally anyway, so the
+        // speech itself is unchanged.
+        var samples: [Float] = []
+        for sentence in Self.sentences(in: text) {
+            var part = try Self.blocking { try await tts.synthesize(sentence) }
+            Self.fadeInRestarts(&part)
+            samples += Self.trimmingSilence(part)
+            samples += [Float](repeating: 0, count: Int(Self.pause(after: sentence) * sampleRate))
+        }
         // Phonon has no speed control, so speed is applied afterwards as a
         // pitch-preserving tempo change.
         return TTSSynthesis(samples: TimeStretch.apply(samples, rate: speed, sampleRate: sampleRate), words: nil)
@@ -182,6 +192,46 @@ final class PhononProvider: TTSProvider, @unchecked Sendable {
             }
             start += frameLength
         }
+    }
+
+    // MARK: - Natural pauses
+
+    /// Sentences as Apple's tokenizer sees them, which (unlike a split on every
+    /// period) keeps "Mr. Smith" and "e.g." inside their sentence.
+    static func sentences(in text: String) -> [String] {
+        let tokenizer = NLTokenizer(unit: .sentence)
+        tokenizer.string = text
+        var sentences: [String] = []
+        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+            let sentence = text[range].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !sentence.isEmpty { sentences.append(sentence) }
+            return true
+        }
+        return sentences.isEmpty ? [text] : sentences
+    }
+
+    /// The pause after a sentence, in seconds: quick after a short beat ("Dad
+    /// put it on."), a held beat after a short setup question ("And
+    /// honestly?"), with up to 12% jitter so no two gaps match - identical gaps
+    /// are what made the old pacing sound like a metronome.
+    static func pause(after sentence: String) -> Double {
+        let words = sentence.split(whereSeparator: \.isWhitespace).count
+        let trimmed = sentence.trimmingCharacters(in: .punctuationCharacters.subtracting(CharacterSet(charactersIn: "?!.")))
+        let base: Double
+        if trimmed.hasSuffix("?") { base = words <= 3 ? 0.52 : 0.38 }
+        else if words <= 4 { base = 0.21 }
+        else if sentence.hasSuffix("\"") || sentence.hasSuffix("\u{201D}") { base = 0.33 }
+        else { base = 0.30 }
+        return base * Double.random(in: 0.88...1.12)
+    }
+
+    /// Drop the dead air Phonon leaves around a sentence, keeping a 30 ms
+    /// lead-in and 50 ms tail so onsets and endings are never clipped.
+    static func trimmingSilence(_ samples: [Float]) -> [Float] {
+        let level: Float = 0.004
+        guard let first = samples.firstIndex(where: { abs($0) > level }),
+              let last = samples.lastIndex(where: { abs($0) > level }) else { return samples }
+        return Array(samples[max(0, first - 720)..<min(samples.count, last + 1200)])
     }
 
     /// Run Phonon's async API to completion from the (synchronous) synth queue.
