@@ -3,6 +3,20 @@
     <channel>
         <title>Orator</title>
         <item>
+            <title>1.8.1</title>
+            <pubDate>Sat, 31 Oct 2026 12:09:00 -0400</pubDate>
+            <sparkle:version>11</sparkle:version>
+            <sparkle:shortVersionString>1.8.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/MyronKoch/orator-macos/releases/download/v1.8.1/Orator-1.8.1.zip" length="180198323" type="application/octet-stream" sparkle:edSignature="2QCI5hytTexRGaS+P+gzzk6kBewQPX87d12Qe3qxur8S098zlwycA2PvyMezJZTx6EXBBXiKNRoo7jXHm1N5AQ=="/>
+            <sparkle:deltas>
+                <enclosure url="https://github.com/MyronKoch/orator-macos/releases/download/v1.8.1/Orator11-10.delta" sparkle:deltaFrom="10" length="807382" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="OVfFSmlt1zF9w3bpuKCEjTaJVROkyMPCjWw2nK6T687gathLd6huoHa+4p1k1oDQxQfzdladrWLatWpS0ehcAg=="/>
+                <enclosure url="https://github.com/MyronKoch/orator-macos/releases/download/v1.8.1/Orator11-9.delta" sparkle:deltaFrom="9" length="135664834" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="S2XsVQ5uRtYl82ilm0N2V4omQxLWwlG9oheI69u5jqkmPvNoKy7rqN4m899NlDyUFn1Z08K3F/FJPspX82crAA=="/>
+                <enclosure url="https://github.com/MyronKoch/orator-macos/releases/download/v1.8.1/Orator11-8.delta" sparkle:deltaFrom="8" length="141208334" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="YDu11TzMeL7CbI6r1EANCeHCjZy9O3vaQ3FztVQkzKGLA4TMo0nJ+1kHT0n6SfJzefmvL83WewsZwbOHZq2wBg=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>1.8.0</title>
             <pubDate>Mon, 26 Oct 2026 00:11:35 -0400</pubDate>
             <sparkle:version>10</sparkle:version>
@@ -26,15 +40,6 @@
             <sparkle:deltas>
                 <enclosure url="https://github.com/MyronKoch/orator-macos/releases/download/v1.7.0/Orator9-8.delta" sparkle:deltaFrom="8" length="7863258" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="CKXKDkmPYPI20/kF8LYfAHUT380lj4ew2wfOa5pMKxPQJo3S6Ewi/bduaGjSTspObo9AeAHYmTunZFW9YrNwAA=="/>
             </sparkle:deltas>
-        </item>
-        <item>
-            <title>1.6.0</title>
-            <pubDate>Tue, 28 Jul 2026 15:26:52 -0400</pubDate>
-            <sparkle:version>8</sparkle:version>
-            <sparkle:shortVersionString>1.6.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/MyronKoch/orator-macos/releases/download/v1.6.0/Orator-1.6.0.zip" length="333174962" type="application/octet-stream" sparkle:edSignature="lUTQdNCt6w0rkkOT6rwVzPgW7FbiSABKXaiVrT2ljaOMv9ipw3/WfLILYKhuA1zb04QPPnCgB6pB6vS/pWErDw=="/>
         </item>
     </channel>
 </rss>
